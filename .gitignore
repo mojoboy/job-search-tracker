@@ -7,3 +7,4 @@
 *.pdf
 
 __pycache__/
+.claude/

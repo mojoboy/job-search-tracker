@@ -2,8 +2,8 @@
 -- JOB SEARCH COMMAND CENTER — Analysis Queries (MySQL)
 -- Run `python job_logger.py setup` once first, so older applications get their 'Applied' status.
 --
--- A "response" means the employer actually replied: Phone Screen, Interview, Offer or Rejected.
--- 'Applied', 'Viewed' and 'Ghosted' are not responses.
+-- A "response" is any status except 'Applied', 'Viewed', 'Ghosted' and 'Withdrawn': the employer replied,
+-- including rejections and stages you add yourself (like 'Skills test'). The app uses the same rules.
 -- =====================================================
 
 USE job_search_tracker;
@@ -13,13 +13,13 @@ USE job_search_tracker;
 SELECT
     COALESCE(rv.version_name, '(none)') AS resume_version,
     COUNT(DISTINCT a.application_id) AS total_applications,
-    COUNT(DISTINCT CASE WHEN se.status IN ('Phone Screen','Interview','Offer','Rejected') THEN a.application_id END) AS got_response,
+    COUNT(DISTINCT CASE WHEN se.status NOT IN ('Applied','Viewed','Ghosted','Withdrawn') THEN a.application_id END) AS got_response,
     ROUND(
-        COUNT(DISTINCT CASE WHEN se.status IN ('Phone Screen','Interview','Offer','Rejected') THEN a.application_id END)
+        COUNT(DISTINCT CASE WHEN se.status NOT IN ('Applied','Viewed','Ghosted','Withdrawn') THEN a.application_id END)
         / COUNT(DISTINCT a.application_id) * 100, 1
     ) AS response_rate_pct,
     ROUND(
-        COUNT(DISTINCT CASE WHEN se.status IN ('Phone Screen','Interview','Offer') THEN a.application_id END)
+        COUNT(DISTINCT CASE WHEN se.status IN ('Interview','Offer') THEN a.application_id END)
         / COUNT(DISTINCT a.application_id) * 100, 1
     ) AS interview_rate_pct
 FROM applications a
@@ -34,7 +34,7 @@ WITH first_response AS (
         application_id,
         MIN(event_date) AS first_response_date
     FROM status_events
-    WHERE status IN ('Phone Screen','Interview','Offer','Rejected')
+    WHERE status NOT IN ('Applied','Viewed','Ghosted','Withdrawn')
     GROUP BY application_id
 )
 SELECT
@@ -85,7 +85,7 @@ ORDER BY days_since_applied DESC;
 SELECT
     COALESCE(a.channel, '(unknown)') AS channel,
     COUNT(DISTINCT a.application_id) AS total_applications,
-    COUNT(DISTINCT CASE WHEN se.status IN ('Phone Screen','Interview','Offer','Rejected') THEN a.application_id END) AS got_response,
+    COUNT(DISTINCT CASE WHEN se.status NOT IN ('Applied','Viewed','Ghosted','Withdrawn') THEN a.application_id END) AS got_response,
     COUNT(DISTINCT CASE WHEN se.status IN ('Interview','Offer') THEN a.application_id END) AS reached_interview_or_offer,
     ROUND(
         COUNT(DISTINCT CASE WHEN se.status IN ('Interview','Offer') THEN a.application_id END)

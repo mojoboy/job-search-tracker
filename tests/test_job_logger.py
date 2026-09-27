@@ -96,20 +96,41 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(self.db.query("SELECT location FROM applications")[0][0], "Baltimore, MD")
 
     def test_location_kept_in_notes_on_older_tables(self):
-        self.db.has_location = False
+        self.db.optional_columns = {"job_description"}  # a table from before the location column
         jl.insert_application(self.db, application(notes="referred by Sam"))
         self.assertEqual(self.db.query("SELECT notes FROM applications")[0][0],
                          "referred by Sam; Location: Baltimore, MD")
 
-    def test_ensure_schema_adds_location_to_an_older_table(self):
+    def test_schema_updates_add_new_columns_to_an_older_table(self):
         db = jl.Database(sqlite3.connect(":memory:"), "sqlite", "old database")
         for statement in jl.schema_statements("sqlite"):
-            db.execute(statement.replace("location VARCHAR(255),", ""))
-        self.assertFalse(db.has_column("applications", "location"))
+            db.execute(statement.replace("location VARCHAR(255),", "").replace("job_description TEXT,", ""))
+        self.assertEqual(jl.missing_schema(db), ([], ["location", "job_description"]))
         with mock.patch("builtins.print"):
             jl.ensure_schema(db, assume_yes=True)
-        self.assertTrue(db.has_location)
-        self.assertTrue(db.has_column("applications", "location"))
+        self.assertEqual(jl.missing_schema(db), ([], []))
+        self.assertEqual(db.optional_columns, {"location", "job_description"})
+
+    def test_schema_updates_create_missing_tables(self):
+        db = jl.Database(sqlite3.connect(":memory:"), "sqlite", "empty database")
+        self.assertEqual(jl.missing_schema(db)[0], list(jl.TABLES))
+        jl.apply_schema_updates(db)
+        self.assertEqual(jl.missing_schema(db), ([], []))
+
+    def test_description_is_saved(self):
+        app_id = jl.insert_application(self.db, application(job_description="Full posting text"))
+        self.assertEqual(self.db.query("SELECT job_description FROM applications WHERE application_id = %s",
+                                       (app_id,))[0][0], "Full posting text")
+
+    def test_save_env_updates_keys_and_keeps_comments(self):
+        with tempfile.TemporaryDirectory() as folder:
+            env_file = Path(folder) / ".env"
+            env_file.write_text("# my settings\nDB_USER=root\nDB_PASSWORD=old\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {}):
+                jl.save_env({"DB_PASSWORD": "new secret", "ANTHROPIC_API_KEY": "sk-test"}, env_file)
+                self.assertEqual(os.environ["DB_PASSWORD"], "new secret")
+            self.assertEqual(env_file.read_text(encoding="utf-8"),
+                             "# my settings\nDB_USER=root\nDB_PASSWORD=new secret\nANTHROPIC_API_KEY=sk-test\n")
 
     def test_backfill_applied_events(self):
         self.db.execute("INSERT INTO applications (company_name, role_title, date_applied) VALUES (%s, %s, %s)",

@@ -65,6 +65,9 @@ REQUIRED_FIELDS = ("company_name", "role_title")
 DEFAULT_CHANNELS = ["LinkedIn", "Indeed", "Company site", "Job board", "Referral", "Recruiter", "Career fair"]
 DEFAULT_STATUSES = ["Applied", "Viewed", "Phone Screen", "Interview", "Offer", "Rejected", "Ghosted", "Withdrawn"]
 STATUS_ALIASES = {"submitted": "Applied", "sent": "Applied", "screening": "Phone Screen", "no response": "Ghosted"}
+# Statuses that don't mean the employer replied. Every other status, including ones you add
+# such as 'Skills test' or 'Demo lesson', counts as a response.
+NOT_RESPONSES = ("Applied", "Viewed", "Ghosted", "Withdrawn")
 
 # Website of the job link -> channel offered as the default
 CHANNEL_BY_DOMAIN = {
@@ -94,6 +97,9 @@ TRACKING_PARAM = re.compile(
 # Longest value each column accepts
 COLUMN_LIMITS = {"company_name": 255, "role_title": 255, "location": 255, "channel": 50,
                  "job_posting_url": 2048, "industry": 100, "salary_listed": 100}
+TABLES = ("resume_versions", "applications", "status_events")
+# Columns added to applications after the first version, with their MySQL types
+ADDED_COLUMNS = {"location": "VARCHAR(255)", "job_description": "MEDIUMTEXT"}
 
 
 # ---------------------------------------------------------------- settings
@@ -112,6 +118,23 @@ def load_env(path=HERE / ".env"):
         os.environ.setdefault(key, value)
 
 
+def save_env(values, path=HERE / ".env"):
+    """Set KEY=VALUE lines in .env (keeping comments and other keys) and apply them right away."""
+    if path.exists():
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    else:
+        example = path.with_name(".env.example")
+        lines = example.read_text(encoding="utf-8-sig").splitlines() if example.exists() else []
+    remaining = {key: str(value).strip() for key, value in values.items()}
+    updated = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip() if "=" in line and not line.lstrip().startswith("#") else None
+        updated.append(f"{key}={remaining.pop(key)}" if key in remaining else line)
+    updated += [f"{key}={value}" for key, value in remaining.items()]
+    path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+    os.environ.update({key: str(value).strip() for key, value in values.items()})
+
+
 # ---------------------------------------------------------------- database
 
 class Database:
@@ -121,7 +144,7 @@ class Database:
         self.conn = conn
         self.engine = engine
         self.label = label
-        self.has_location = True
+        self.optional_columns = set(ADDED_COLUMNS)  # the ADDED_COLUMNS this database actually has
 
     def _run(self, sql, params):
         if self.engine == "sqlite":
@@ -205,6 +228,7 @@ def connect_or_exit(allow_create=False, assume_yes=False):
 
 def schema_statements(engine):
     key = "INTEGER PRIMARY KEY AUTOINCREMENT" if engine == "sqlite" else "INT AUTO_INCREMENT PRIMARY KEY"
+    long_text = "TEXT" if engine == "sqlite" else "MEDIUMTEXT"
     return [
         f"""CREATE TABLE IF NOT EXISTS resume_versions (
             resume_version_id {key},
@@ -224,6 +248,7 @@ def schema_statements(engine):
             industry VARCHAR(100),
             salary_listed VARCHAR(100),
             notes TEXT,
+            job_description {long_text},
             FOREIGN KEY (resume_version_id) REFERENCES resume_versions(resume_version_id)
         )""",
         f"""CREATE TABLE IF NOT EXISTS status_events (
@@ -237,31 +262,55 @@ def schema_statements(engine):
     ]
 
 
-def ensure_schema(db, assume_yes=False):
-    """Create missing tables and add the columns this version of the script uses."""
-    missing = [table for table in ("resume_versions", "applications", "status_events") if not db.has_table(table)]
-    if missing:
-        if not (assume_yes or yes_no(f"These tables don't exist yet: {', '.join(missing)}. Create them?", default=True)):
-            sys.exit("Can't continue without them.")
+def missing_schema(db):
+    """(missing tables, missing columns) compared with what this version uses."""
+    tables = [table for table in TABLES if not db.has_table(table)]
+    if "applications" in tables:
+        return tables, []
+    return tables, [column for column in ADDED_COLUMNS if not db.has_column("applications", column)]
+
+
+def load_optional_columns(db):
+    db.optional_columns = {column for column in ADDED_COLUMNS if db.has_column("applications", column)}
+
+
+def apply_schema_updates(db):
+    """Create missing tables and add missing columns. Additive only: never drops or changes existing data."""
+    tables, columns = missing_schema(db)
+    if tables:
         for statement in schema_statements(db.engine):
             db.execute(statement)
-        db.commit()
+    for column in columns:
+        db.execute(f"ALTER TABLE applications ADD COLUMN {column} {ADDED_COLUMNS[column]}")
+    db.commit()
+    load_optional_columns(db)
+
+
+def ensure_schema(db, assume_yes=False):
+    """Ask before creating missing tables or adding the columns this version of the script uses."""
+    tables, columns = missing_schema(db)
+    if tables:
+        if not (assume_yes or yes_no(f"These tables don't exist yet: {', '.join(tables)}. Create them?", default=True)):
+            sys.exit("Can't continue without them.")
+        apply_schema_updates(db)
         print("Created the tables.")
-    db.has_location = db.has_column("applications", "location")
-    if not db.has_location and (assume_yes or yes_no(
-            "Your applications table has no 'location' column, so locations get thrown away. Add it?", default=True)):
-        db.execute("ALTER TABLE applications ADD COLUMN location VARCHAR(255)")
-        db.commit()
-        db.has_location = True
-        print("Added the 'location' column.")
+    elif columns and (assume_yes or yes_no(
+            f"Your applications table is missing columns this version uses ({', '.join(columns)}). "
+            "Add them? Nothing else changes.", default=True)):
+        apply_schema_updates(db)
+        print(f"Added: {', '.join(columns)}.")
+    load_optional_columns(db)
+
+
+MISSING_APPLIED_SQL = (
+    "SELECT a.application_id, a.date_applied FROM applications a WHERE NOT EXISTS "
+    "(SELECT 1 FROM status_events se WHERE se.application_id = a.application_id AND se.status = 'Applied')"
+)
 
 
 def backfill_applied_events(db, assume_yes=False):
     """Give older applications the 'Applied' status row the funnel queries count from."""
-    rows = db.query(
-        "SELECT a.application_id, a.date_applied FROM applications a WHERE NOT EXISTS "
-        "(SELECT 1 FROM status_events se WHERE se.application_id = a.application_id AND se.status = 'Applied')"
-    )
+    rows = db.query(MISSING_APPLIED_SQL)
     if not rows or not (assume_yes or yes_no(
             f"{len(rows)} applications have no 'Applied' status yet, so the funnel can't count them. "
             "Add it, dated the day you applied?", default=True)):
@@ -452,15 +501,13 @@ def match_existing(existing, company, role, url):
 def insert_application(db, app, commit=True):
     """Insert an application plus its 'Applied' status row, all-or-nothing."""
     app = dict(app)
-    if not db.has_location and app.get("location"):  # older table: keep the location in the notes instead
+    if "location" not in db.optional_columns and app.get("location"):  # older table: keep it in the notes
         app["notes"] = "; ".join(filter(None, [app.get("notes"), f"Location: {app['location']}"]))
     for column, limit in COLUMN_LIMITS.items():
         if isinstance(app.get(column), str):
             app[column] = app[column][:limit]
     columns = ["company_name", "role_title", "date_applied", "channel", "resume_version_id",
-               "job_posting_url", "industry", "salary_listed", "notes"]
-    if db.has_location:
-        columns.insert(2, "location")
+               "job_posting_url", "industry", "salary_listed", "notes"] + sorted(db.optional_columns)
     try:
         app_id = db.execute(
             f"INSERT INTO applications ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))})",
@@ -484,12 +531,23 @@ def add_status(db, application_id, status, event_date, notes=None, commit=True):
         db.commit()
 
 
-def choose_channel(db, url):
+def known_channels(db):
+    """The default channels plus the ones you use most."""
     used = [row[0] for row in db.query(
         "SELECT channel FROM applications WHERE channel IS NOT NULL AND channel <> '' "
         "GROUP BY channel ORDER BY COUNT(*) DESC LIMIT 10")]
+    return unique(DEFAULT_CHANNELS + used)
+
+
+def update_statuses(db):
+    """Statuses to offer when recording an update: the defaults plus any you've added, minus 'Applied'."""
+    used = [row[0] for row in db.query("SELECT DISTINCT status FROM status_events")]
+    return unique([status for status in DEFAULT_STATUSES + used if status != "Applied"])
+
+
+def choose_channel(db, url):
     guess = guess_channel(url)
-    return choose("Where did you find the job?", unique(DEFAULT_CHANNELS + used + [guess]), default=guess)
+    return choose("Where did you find the job?", unique(known_channels(db) + [guess]), default=guess)
 
 
 def choose_resume_version(db):
@@ -534,7 +592,7 @@ def resolve_resume_version(db, name, cache):
 
 def add_job(db):
     """Paste a posting (or type the details), check them, and save with an 'Applied' status."""
-    fields = {}
+    fields, job_text = {}, ""
     if os.environ.get("ANTHROPIC_API_KEY"):
         print("Paste the job posting below, then type END on its own line.")
         print("(Type END right away to fill in the details yourself.)\n", flush=True)
@@ -574,6 +632,7 @@ def add_job(db):
         "industry": details["industry"] or None,
         "salary_listed": details["salary_range"] or None,
         "notes": notes or None,
+        "job_description": job_text.strip() or None,
     })
     print(f"\nLogged {details['company_name']} - {details['role_title']} as application #{app_id} (status: Applied).")
     return app_id
@@ -622,9 +681,7 @@ def update_status(db):
     if not app:
         return None
     app_id, company, role = app[0], app[1], app[2]
-    used = [row[0] for row in db.query("SELECT DISTINCT status FROM status_events")]
-    options = unique([status for status in DEFAULT_STATUSES + used if status != "Applied"])
-    status = normalize_status(choose(f"What happened with {company} - {role}?", options))
+    status = normalize_status(choose(f"What happened with {company} - {role}?", update_statuses(db)))
     when = ask_date("When", allow_future=True)
     notes = input("Notes (Enter to skip): ").strip()
     add_status(db, app_id, status, when, notes or None)
@@ -647,9 +704,8 @@ COLUMN_ALIASES = {
 }
 
 
-def read_csv_rows(path):
-    """Rows of a CSV from Excel, Google Sheets or this tool (comma, semicolon or tab separated)."""
-    raw = Path(path).read_bytes()
+def decode_csv(raw):
+    """Rows of a CSV file's bytes from Excel, Google Sheets or this tool (comma, semicolon or tab separated)."""
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -657,6 +713,10 @@ def read_csv_rows(path):
     header = text.split("\n", 1)[0]
     delimiter = max(",;\t", key=header.count)
     return list(csv.reader(io.StringIO(text, newline=""), delimiter=delimiter))
+
+
+def read_csv_rows(path):
+    return decode_csv(Path(path).read_bytes())
 
 
 def map_columns(header):
@@ -703,6 +763,49 @@ def parse_rows(rows, mapping, today=None):
     return apps, problems
 
 
+IMPORT_REQUIRED = ("company_name", "role_title", "date_applied")
+
+
+def plan_import(db, rows):
+    """Sort CSV rows into new applications, ones already logged, and ones with problems (nothing is saved)."""
+    mapping = map_columns(rows[0]) if rows else {}
+    plan = {"mapping": mapping, "headers": rows[0] if rows else [], "new": [], "duplicates": [], "problems": [],
+            "missing": [field for field in IMPORT_REQUIRED if field not in mapping]}
+    if plan["missing"]:
+        return plan
+    apps, plan["problems"] = parse_rows(rows[1:], mapping)
+    existing = load_existing(db)
+    for app in apps:
+        match = match_existing(existing, app["company_name"], app["role_title"], app["job_posting_url"])
+        if match:
+            plan["duplicates"].append(f"line {app['line']}: {app['company_name']} - {app['role_title']} "
+                                      f"is already logged ({match[0]})")
+        else:
+            plan["new"].append(app)
+            remember(existing, f"line {app['line']} of this file", app["company_name"], app["role_title"],
+                     app["date_applied"], app["job_posting_url"])
+    return plan
+
+
+def run_import(db, plan, default_resume_id=None, cache=None):
+    """Save a plan's new applications in one transaction: all of them, or none if anything fails."""
+    cache = {} if cache is None else cache
+    line = None
+    try:
+        for app in plan["new"]:
+            app = dict(app)
+            line, status, resume = app.pop("line"), app.pop("status"), app.pop("resume_version")
+            app["resume_version_id"] = resolve_resume_version(db, resume, cache) if resume else default_resume_id
+            app_id = insert_application(db, app, commit=False)
+            if status != "Applied":
+                add_status(db, app_id, status, date.today(), "imported; the real date is unknown", commit=False)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise RuntimeError(f"Stopped at line {line}: {e}. Nothing was imported.") from e
+    return len(plan["new"])
+
+
 def import_applications(db, path, resume_name=None, assume_yes=False):
     """Add applications from a CSV, skipping ones already logged. All-or-nothing."""
     if not Path(path).exists():
@@ -712,28 +815,15 @@ def import_applications(db, path, resume_name=None, assume_yes=False):
     if not rows:
         print("That file is empty.")
         return 0
-    mapping = map_columns(rows[0])
-    missing = [field for field in ("company_name", "role_title", "date_applied") if field not in mapping]
-    if missing:
-        print(f"Couldn't find a column for: {', '.join(missing)}.")
-        print(f"The file's headers are: {', '.join(rows[0])}")
+    plan = plan_import(db, rows)
+    if plan["missing"]:
+        print(f"Couldn't find a column for: {', '.join(plan['missing'])}.")
+        print(f"The file's headers are: {', '.join(plan['headers'])}")
         return 0
 
-    apps, problems = parse_rows(rows[1:], mapping)
-    existing = load_existing(db)
-    new, duplicates = [], []
-    for app in apps:
-        match = match_existing(existing, app["company_name"], app["role_title"], app["job_posting_url"])
-        if match:
-            duplicates.append(f"line {app['line']}: {app['company_name']} - {app['role_title']} "
-                              f"is already logged ({match[0]})")
-        else:
-            new.append(app)
-            remember(existing, f"line {app['line']} of this file", app["company_name"], app["role_title"],
-                     app["date_applied"], app["job_posting_url"])
-
-    print(f"\n{len(new)} new, {len(duplicates)} already logged, {len(problems)} with problems.")
-    for message in (duplicates + problems)[:20]:
+    new = plan["new"]
+    print(f"\n{len(new)} new, {len(plan['duplicates'])} already logged, {len(plan['problems'])} with problems.")
+    for message in (plan["duplicates"] + plan["problems"])[:20]:
         print(f"  {message}")
     if not new:
         return 0
@@ -742,27 +832,19 @@ def import_applications(db, path, resume_name=None, assume_yes=False):
         return 0
 
     cache, default_resume_id = {}, None
-    if "resume_version" not in mapping:
+    if "resume_version" not in plan["mapping"]:
         if resume_name:
             default_resume_id = resolve_resume_version(db, resume_name, cache)
         elif not assume_yes:
             print("\nThe file has no resume column.")
             default_resume_id = choose_resume_version(db)
-    line = None
     try:
-        for app in new:
-            line, status, resume = app.pop("line"), app.pop("status"), app.pop("resume_version")
-            app["resume_version_id"] = resolve_resume_version(db, resume, cache) if resume else default_resume_id
-            app_id = insert_application(db, app, commit=False)
-            if status != "Applied":
-                add_status(db, app_id, status, date.today(), "imported; the real date is unknown", commit=False)
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        print(f"Stopped at line {line}: {e}\nNothing was imported.")
+        added = run_import(db, plan, default_resume_id, cache)
+    except RuntimeError as e:
+        print(e)
         return 0
-    print(f"Imported {len(new)} applications.")
-    return len(new)
+    print(f"Imported {added} applications.")
+    return added
 
 
 EXPORT_HEADER = ["application_id", "date_applied", "company_name", "role_title", "location", "channel",
@@ -770,23 +852,34 @@ EXPORT_HEADER = ["application_id", "date_applied", "company_name", "role_title",
                  "job_posting_url", "notes"]
 
 
-def export_applications(db, path=None):
-    """Write every application with its current status to a CSV that opens cleanly in Excel."""
-    path = Path(path) if path else HERE / f"applications_export_{date.today()}.csv"
+def export_rows(db):
+    """Every application with its resume version and current status, oldest first."""
     latest = ("(SELECT se.{} FROM status_events se WHERE se.application_id = a.application_id "
               "ORDER BY se.event_date DESC, se.status_event_id DESC LIMIT 1)")
-    rows = db.query(f"""
+    return db.query(f"""
         SELECT a.application_id, a.date_applied, a.company_name, a.role_title,
-               {'a.location' if db.has_location else 'NULL'}, a.channel, rv.version_name,
+               {'a.location' if 'location' in db.optional_columns else 'NULL'}, a.channel, rv.version_name,
                a.industry, a.salary_listed, {latest.format('status')}, {latest.format('event_date')},
                a.job_posting_url, a.notes
         FROM applications a
         LEFT JOIN resume_versions rv ON rv.resume_version_id = a.resume_version_id
         ORDER BY a.date_applied, a.application_id""")
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f)
-        writer.writerow(EXPORT_HEADER)
-        writer.writerows(rows)
+
+
+def export_csv_bytes(rows):
+    """Export rows as CSV bytes that open cleanly in Excel (UTF-8 with a byte-order mark)."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(EXPORT_HEADER)
+    writer.writerows(rows)
+    return buffer.getvalue().encode("utf-8-sig")
+
+
+def export_applications(db, path=None):
+    """Write every application with its current status to a CSV file."""
+    path = Path(path) if path else HERE / f"applications_export_{date.today()}.csv"
+    rows = export_rows(db)
+    path.write_bytes(export_csv_bytes(rows))
     print(f"Saved {len(rows)} applications to {path}")
     return path
 
