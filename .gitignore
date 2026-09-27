@@ -1,0 +1,9 @@
+# secrets
+.env
+
+# personal job-search data (exports, application logs, resumes, cover letters)
+*.csv
+*.docx
+*.pdf
+
+__pycache__/
