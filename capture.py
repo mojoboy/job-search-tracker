@@ -11,9 +11,11 @@ Turn a job link into the tracker's fields while spending as little as possible o
 """
 
 import html
+import ipaddress
 import json
 import os
 import re
+import socket
 import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, urlsplit
@@ -32,10 +34,35 @@ class CaptureError(Exception):
     """A job page couldn't be read. The message says what to do instead."""
 
 
+def check_public_url(url):
+    """Only fetch public web pages: refuses other schemes and hosts that resolve to private, loopback or
+    link-local addresses, so a hosted copy of the app can't be pointed at its own network."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise CaptureError("That doesn't look like a web link. Paste the job posting's address.")
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(parts.hostname, parts.port or 443)}
+    except (socket.gaierror, UnicodeError) as e:
+        raise CaptureError("Couldn't find that website. Check the link.") from e
+    for address in addresses:
+        if not ipaddress.ip_address(address.split("%")[0]).is_global:
+            raise CaptureError("That link points to a private address, which the tracker won't open.")
+
+
+class _CheckedRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        check_public_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_opener = urllib.request.build_opener(_CheckedRedirects)
+
+
 def fetch(url, timeout=20):
+    check_public_url(url)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _opener.open(request, timeout=timeout) as response:
             raw = response.read(MAX_BYTES)
             charset = response.headers.get_content_charset() or "utf-8"
     except urllib.error.HTTPError as e:

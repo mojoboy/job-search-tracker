@@ -119,6 +119,23 @@ class ReadLinkTests(unittest.TestCase):
         self.assertTrue(fetch.call_args[0][0].endswith("/job?in_iframe=1"))
 
 
+class SafetyTests(unittest.TestCase):
+    def test_refuses_private_and_non_web_addresses(self):
+        for url in ("http://127.0.0.1:8501/", "http://localhost/admin", "http://169.254.169.254/latest/meta-data",
+                    "http://10.0.0.5/", "http://[::1]/", "file:///C:/Windows/win.ini", "ftp://example.com/job"):
+            with self.assertRaises(capture.CaptureError, msg=url):
+                capture.check_public_url(url)
+
+    def test_allows_public_addresses(self):
+        with mock.patch.object(capture.socket, "getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
+            capture.check_public_url("https://jobs.example.com/1")
+
+    def test_redirects_are_checked_too(self):
+        handler = capture._CheckedRedirects()
+        with self.assertRaises(capture.CaptureError):
+            handler.redirect_request(None, None, 302, "Found", {}, "http://127.0.0.1/secret")
+
+
 class ClaudeFillTests(unittest.TestCase):
     def test_fills_only_blank_fields(self):
         result = {"company_name": "", "role_title": "Analyst", "location": "Remote", "salary_range": "",

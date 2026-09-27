@@ -1,14 +1,21 @@
-[server]
-# Only this computer can open the tracker (it can read and change your settings).
-address = "localhost"
-
 [browser]
 gatherUsageStats = false
+
+[client]
+# Hide Streamlit's developer menu (deploy, rerun, settings)
+toolbarMode = "minimal"
 
 [theme]
 base = "light"
 primaryColor = "#2a78d6"
 backgroundColor = "#fcfcfb"
-secondaryBackgroundColor = "#f0efec"
+secondaryBackgroundColor = "#f3f2ef"
 textColor = "#0b0b0b"
-font = "sans serif"
+linkColor = "#2a78d6"
+blueColor = "#2a78d6"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+baseRadius = "0.75rem"
+buttonRadius = "full"
+borderColor = "#e6e4de"
+showWidgetBorder = true
+dataframeHeaderBackgroundColor = "#f3f2ef"

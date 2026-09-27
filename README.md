@@ -1,13 +1,15 @@
 # Job Search Tracker
 
-Track job applications and what happens to them without writing SQL. Paste a job link and the details fill themselves in, update statuses from a dropdown, and see which resumes and channels actually get replies. It works for any field: you name your own resume versions, channels and stages.
+Track job applications and what happens to them without writing SQL. Paste a job link and the details fill themselves in, move applications across a board as replies come in, and see which resumes and channels actually get responses. It works for any field: you name your own resume versions, channels and stages.
+
+**[Try the live demo](https://mojoboy-job-tracker.streamlit.app)** (made-up sample data; your changes stay in your browser tab)
 
 ![The dashboard, shown with sample data](docs/dashboard.png)
 
 ## Start it
 
 1. You need Python 3.10+ and MySQL 8.
-2. Double-click `start.bat`. The first run installs what it needs, then the tracker opens in your browser. (Or run `pip install -r requirements.txt`, then `streamlit run app.py`.)
+2. Double-click `start.bat`. The first run sets up the tracker's own Python environment (a `.venv` folder, a few minutes), then the tracker opens in your browser.
 3. On the first screen, enter your MySQL user and password, and a Claude API key if you have one. They're saved in `.env` on your computer; the tracker creates its tables for you.
 
 ## What's in it
@@ -15,11 +17,11 @@ Track job applications and what happens to them without writing SQL. Paste a job
 | Page | What it does |
 |---|---|
 | **Log a job** | Paste a job link; the company, role, location, pay and full description fill in. Pick where you found it and which resume you sent, then save. It warns you if you already logged that job. |
-| **Pipeline** | Every application with its current status. Record a phone screen, interview, offer or rejection, or a stage of your own like "Skills test". |
-| **Dashboard** | Response and interview rates, how far applications get, applications per week, which resumes and channels get replies, and who's gone quiet for three weeks. |
+| **Pipeline** | A board with Applied, In conversation, Interviewing, Offer and Closed columns, or a table. Open any application to record a phone screen, interview, offer or rejection, or a stage of your own like "Skills test". |
+| **Dashboard** | Response and interview rates, how far applications get, applications per week, which resumes and channels get replies, and who's gone quiet for three weeks, for the last 30 or 90 days or all time. |
 | **Settings** | Connection and API key, resume versions, import from a spreadsheet (CSV), export, and a **Log this job** browser bookmark. |
 
-**How links are read:** Greenhouse, LinkedIn and Oracle job pages are read through their public job data. Most other job sites (Workday, Lever, Ashby, iCIMS, SmartRecruiters and many company sites) include standard job data in the page. With a Claude API key, anything still missing (usually the industry) is filled in from the description. Sites that block automatic reading, such as Indeed, get a "paste the description instead" message.
+**How links are read:** Greenhouse, LinkedIn and Oracle job pages are read through their public job data. Most other job sites (Workday, Lever, Ashby, iCIMS, SmartRecruiters and many company sites) include standard job data in the page. With a Claude API key, anything still missing (usually the industry) is filled in from the description. Sites that block automatic reading, such as Indeed, get a "paste the description instead" message. Only public web addresses are fetched.
 
 ## Command line
 
@@ -40,6 +42,7 @@ Track job applications and what happens to them without writing SQL. Paste a job
 | File | Role |
 |---|---|
 | `app.py` | The Streamlit web app |
+| `demo.py`, `sample_data.py` | The public demo: the same app on made-up data, one private copy per browser tab |
 | `capture.py` | Reads job links: public job data, schema.org JobPosting, then Claude for the gaps |
 | `analytics.py` | Dashboard numbers, computed with pandas |
 | `job_logger.py` | Database access, schema updates, import/export, and the command line |

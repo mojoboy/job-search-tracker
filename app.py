@@ -1,14 +1,17 @@
 """
 app.py
 -------
-The Job Search Tracker as a local web app: log a job from its link, record what happens,
-and see what's working.
+The Job Search Tracker web app: log a job from its link, record what happens, and see what's working.
 
     streamlit run app.py      (or double-click start.bat)
+
+demo.py runs the same app on made-up sample data; that's the public demo.
 """
 
+import html
 import os
-from datetime import date
+import sqlite3
+from datetime import date, timedelta
 
 import altair as alt
 import pandas as pd
@@ -17,148 +20,171 @@ import streamlit as st
 import analytics
 import capture
 import job_logger as jl
+import sample_data
 
-st.set_page_config(page_title="Job Search Tracker", layout="wide")
-
-PAGES = ["Log a job", "Pipeline", "Dashboard", "Settings"]
+REPO_URL = "https://github.com/mojoboy/job-search-tracker"
 NO_RESUME = "No resume version"
 
 # Chart colors, checked for contrast and color-blind safety on the app's #fcfcfb background
 BLUE = "#2a78d6"                                            # the single series color
 FUNNEL_BLUES = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab"]  # one hue, light (first stage) to dark
 INK_2, MUTED, GRID, AXIS = "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
+# System fonts for charts: they measure label widths before web fonts load, so Inter would get clipped
 FONT = "system-ui, -apple-system, 'Segoe UI', sans-serif"
 
+# Pipeline board columns: name, badge color, and the statuses that belong there.
+# "In conversation" takes every reply stage not listed (Phone Screen, Skills test, Demo lesson...).
+BOARD = [
+    ("Applied", "gray", {"Applied", "Viewed"}),
+    ("In conversation", "blue", None),
+    ("Interviewing", "violet", {"Interview"}),
+    ("Offer", "green", {"Offer"}),
+    ("Closed", "red", {"Rejected", "Ghosted", "Withdrawn"}),
+]
+CARDS_PER_COLUMN = 25
 
-# ---------------------------------------------------------------- Streamlit version differences
+CSS = """
+<style>
+[data-testid="stMainBlockContainer"], .block-container { padding-top: 2.4rem; padding-bottom: 4rem; max-width: 1240px; }
+h1 { letter-spacing: -0.02em; }
+.jt-subtitle { color: #52514e; font-size: 1.05rem; margin: -0.5rem 0 1.5rem; }
+.jt-col-head { display: flex; justify-content: space-between; align-items: center; font-weight: 600;
+               font-size: 0.92rem; padding: 0 0.2rem 0.5rem; }
+.jt-count { background: #f0efec; color: #52514e; border-radius: 999px; padding: 0 0.55rem; font-size: 0.78rem; }
+.jt-card-title { font-weight: 600; line-height: 1.3; }
+.jt-card-role { color: #52514e; font-size: 0.88rem; line-height: 1.35; }
+.jt-history { color: #52514e; font-size: 0.9rem; margin: 0.2rem 0 0.8rem; }
 
-def rerun():
-    (getattr(st, "rerun", None) or st.experimental_rerun)()
+/* ---- motion: pages glide in, cards arrive one after another, things lift when you point at them ---- */
+@keyframes jt-rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes jt-pop { from { opacity: 0; transform: translateY(10px) scale(0.98); } to { opacity: 1; transform: none; } }
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > * {
+  animation: jt-rise 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(2) { animation-delay: 60ms; }
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(3) { animation-delay: 120ms; }
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(4) { animation-delay: 180ms; }
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(n+5) { animation-delay: 240ms; }
+[class*="st-key-jtcard"], [class*="st-key-jtrecent"] {
+  animation: jt-pop 0.4s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation-delay: calc(var(--jt-i, 12) * 45ms + 150ms);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+[class*="st-key-jtcard"]:hover, [class*="st-key-jtrecent"]:hover, [data-testid="stMetric"]:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(11, 11, 11, 0.07);
+}
+[data-testid="stMetric"] { transition: transform 0.18s ease, box-shadow 0.18s ease; }
+[data-testid="stColumn"] [data-testid="stMetric"] { animation: jt-pop 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+[data-testid="stColumn"]:nth-child(2) [data-testid="stMetric"] { animation-delay: 70ms; }
+[data-testid="stColumn"]:nth-child(3) [data-testid="stMetric"] { animation-delay: 140ms; }
+[data-testid="stColumn"]:nth-child(4) [data-testid="stMetric"] { animation-delay: 210ms; }
+[data-testid="stColumn"]:nth-child(5) [data-testid="stMetric"] { animation-delay: 280ms; }
+.stButton button, .stFormSubmitButton button, .stDownloadButton button {
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+.stButton button[kind="primary"]:hover, .stFormSubmitButton button[kind="primaryFormSubmit"]:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(42, 120, 214, 0.28);
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+""" + "".join(f'[class*="st-key-jtcard{i}_"], [class*="st-key-jtrecent{i}_"] {{ --jt-i: {i}; }}\n' for i in range(13)) + """
+</style>
+"""
 
 
-def query_param(name):
-    if hasattr(st, "query_params"):
-        return st.query_params.get(name)
-    values = st.experimental_get_query_params().get(name)
-    return values[0] if values else None
+# ---------------------------------------------------------------- small helpers
+
+def board_column(status):
+    for name, _, statuses in BOARD:
+        if statuses and status in statuses:
+            return name
+    return "In conversation"
 
 
-def clear_query_params():
-    if hasattr(st, "query_params"):
-        st.query_params.clear()
-    else:
-        st.experimental_set_query_params()
+def badge_color(status):
+    if status in ("Ghosted", "Withdrawn"):
+        return "gray"
+    column = board_column(status)
+    return next(color for name, color, _ in BOARD if name == column)
 
 
-def link_column(label):
-    config = getattr(st, "column_config", None)
-    return config.LinkColumn(label) if config and hasattr(config, "LinkColumn") else label
+def card_key(kind, position, application_id):
+    """Container key for a card; its position sets how long the entrance animation waits."""
+    return f"{kind}{min(position, 12)}_{application_id}"
+
+
+def short_date(value):
+    stamp = pd.Timestamp(value)
+    return f"{stamp:%b} {stamp.day}"
+
+
+def esc(text):
+    return html.escape(str(text or ""))
 
 
 def percent(value):
     return "–" if value is None else f"{value:.0%}"
 
 
-# ---------------------------------------------------------------- database and setup
+def heading(title, subtitle=None):
+    st.title(title)
+    if subtitle:
+        st.markdown(f"<p class='jt-subtitle'>{subtitle}</p>", unsafe_allow_html=True)
 
-def connect():
-    test_db = os.environ.get("JOB_TRACKER_TEST_SQLITE")  # only for the automated checks; the app uses MySQL
-    if test_db:
-        import sqlite3
 
-        conn = sqlite3.connect(test_db)
+def notify(message, icon=":material/check_circle:"):
+    """Show a toast on the next run (after st.rerun)."""
+    st.session_state.setdefault("toasts", []).append((message, icon))
+
+
+def show_notices():
+    for message, icon in st.session_state.pop("toasts", []):
+        st.toast(message, icon=icon)
+    if st.session_state.pop("celebrate", False):
+        st.balloons()
+    problem = st.session_state.pop("problem", None)
+    if problem:
+        st.error(problem, icon=":material/error:")
+
+
+# ---------------------------------------------------------------- database
+
+def open_db():
+    """The database for this run, and whether to close it afterwards.
+    The demo keeps one in-memory copy of the sample data per browser tab."""
+    if st.session_state.get("demo"):
+        if "demo_db" not in st.session_state:
+            conn = sqlite3.connect(":memory:", check_same_thread=False)
+            conn.execute("PRAGMA foreign_keys = ON")
+            db = jl.Database(conn, "sqlite", "sample data")
+            sample_data.build(db)
+            st.session_state["demo_db"] = db
+        return st.session_state["demo_db"], False
+    sample_file = os.environ.get("JOB_TRACKER_TEST_SQLITE")  # automated checks only; the app itself uses MySQL
+    if sample_file:
+        conn = sqlite3.connect(sample_file)
         conn.execute("PRAGMA foreign_keys = ON")
-        return jl.Database(conn, "sqlite", "sample data")
-    return jl.get_db_connection()
+        return jl.Database(conn, "sqlite", "sample data"), True
+    return jl.get_db_connection(), True
+
+
+def current_db():
+    return st.session_state["_db"]
 
 
 def plain_error(error):
     errno = getattr(error, "errno", None)
     if errno == 1045:
+        if not os.environ.get("DB_PASSWORD"):
+            return None  # first run: nothing entered yet
         return "MySQL says the user name or password is wrong. Check them below."
     if errno in (2003, 2005):
         return ("Couldn't reach MySQL. Make sure it's running (on Windows, the MySQL80 service) "
                 "and that the host and port below are right.")
     return f"Couldn't connect to the database: {error}"
-
-
-def settings_form(first_run=False):
-    """Connection details and the API key, saved to .env. Leaving a password field blank keeps what's saved."""
-    env = os.environ
-    with st.form("settings"):
-        st.markdown("**MySQL**")
-        left, right = st.columns(2)
-        user = left.text_input("User", env.get("DB_USER", "root"))
-        password = right.text_input("Password", type="password",
-                                    placeholder="(saved)" if env.get("DB_PASSWORD") else "")
-        host_col, port_col, name_col = st.columns([2, 1, 2])
-        host = host_col.text_input("Host", env.get("DB_HOST", "127.0.0.1"))
-        port = port_col.text_input("Port", env.get("DB_PORT", "3306"))
-        name = name_col.text_input("Database", env.get("DB_NAME", "job_search_tracker"))
-        st.markdown("**Claude API key** (optional: lets the tracker fill in details from job pages)")
-        api_key = st.text_input("Claude API key", type="password", label_visibility="collapsed",
-                                placeholder="(saved)" if env.get("ANTHROPIC_API_KEY") else "sk-ant-...")
-        st.caption("Saved in the .env file in this folder. It stays on your computer and is never uploaded.")
-        if st.form_submit_button("Save and connect" if first_run else "Save", type="primary"):
-            if not port.strip().isdigit():
-                st.error("The port should be a number, like 3306.")
-                return
-            values = {"DB_USER": user, "DB_HOST": host, "DB_PORT": port, "DB_NAME": name}
-            if password:
-                values["DB_PASSWORD"] = password
-            if api_key:
-                values["ANTHROPIC_API_KEY"] = api_key
-            jl.save_env(values)
-            st.session_state["notice"] = "Settings saved."
-            rerun()
-
-
-def connection_screen(error):
-    st.title("Job Search Tracker")
-    st.subheader("Connect to your MySQL database")
-    if isinstance(error, ImportError):
-        st.error("A Python package is missing. In a terminal in this folder, run: pip install -r requirements.txt")
-        return
-    if getattr(error, "errno", None) == 1049:  # MySQL is fine, the database doesn't exist yet
-        name = os.environ.get("DB_NAME", "job_search_tracker")
-        st.info(f"MySQL is running, but it doesn't have a database called '{name}' yet.")
-        if st.button(f"Create '{name}'", type="primary"):
-            try:
-                jl.get_db_connection(create_database=True).close()
-            except Exception as e:
-                st.error(plain_error(e))
-            else:
-                rerun()
-        return
-    st.warning(plain_error(error))
-    settings_form(first_run=True)
-
-
-def setup_screen(db, tables):
-    st.title("Job Search Tracker")
-    st.subheader("Set up your database")
-    st.write(f"Connected to {db.label}, which doesn't have the tracker's tables yet ({', '.join(tables)}).")
-    if st.button("Create the tables", type="primary"):
-        jl.apply_schema_updates(db)
-        rerun()
-
-
-def update_banner(db):
-    """Offer the one-time updates older databases need."""
-    _, columns = jl.missing_schema(db)
-    missing_applied = len(db.query(jl.MISSING_APPLIED_SQL))
-    if not columns and not missing_applied:
-        return
-    parts = []
-    if columns:
-        parts.append(f"add the columns {', '.join(columns)}")
-    if missing_applied:
-        parts.append(f"give {missing_applied} older applications their 'Applied' status so the dashboard counts them")
-    st.info(f"One-time database update: {' and '.join(parts)}. Nothing is deleted or changed.")
-    if st.button("Update now"):
-        jl.apply_schema_updates(db)
-        jl.backfill_applied_events(db, assume_yes=True)
-        rerun()
 
 
 def resume_versions(db):
@@ -181,6 +207,100 @@ def resume_id_for(db, picked, typed):
     return None
 
 
+# ---------------------------------------------------------------- first run
+
+def settings_form(first_run=False):
+    """Connection details and the API key, saved to .env. Leaving a password field blank keeps what's saved."""
+    env = os.environ
+    with st.form("settings"):
+        st.markdown("**MySQL**")
+        left, right = st.columns(2)
+        user = left.text_input("User", env.get("DB_USER", "root"))
+        password = right.text_input("Password", type="password",
+                                    placeholder="(saved)" if env.get("DB_PASSWORD") else "")
+        host_col, port_col, name_col = st.columns([2, 1, 2])
+        host = host_col.text_input("Host", env.get("DB_HOST", "127.0.0.1"))
+        port = port_col.text_input("Port", env.get("DB_PORT", "3306"))
+        name = name_col.text_input("Database", env.get("DB_NAME", "job_search_tracker"))
+        st.markdown("**Claude API key** (optional: fills in details some job pages leave out)")
+        api_key = st.text_input("Claude API key", type="password", label_visibility="collapsed",
+                                placeholder="(saved)" if env.get("ANTHROPIC_API_KEY") else "sk-ant-...")
+        st.caption("Saved in the .env file in this folder. It stays on your computer and is never uploaded.")
+        if st.form_submit_button("Save and connect" if first_run else "Save", type="primary"):
+            if not port.strip().isdigit():
+                st.error("The port should be a number, like 3306.")
+                return
+            values = {"DB_USER": user, "DB_HOST": host, "DB_PORT": port, "DB_NAME": name}
+            if password:
+                values["DB_PASSWORD"] = password
+            if api_key:
+                values["ANTHROPIC_API_KEY"] = api_key
+            jl.save_env(values)
+            notify("Settings saved")
+            st.rerun()
+
+
+def connection_screen(error):
+    _, middle, _ = st.columns([1, 2, 1])
+    with middle:
+        heading("Welcome to Job Search Tracker", "Connect your MySQL database to get started. You only do this once.")
+        if isinstance(error, ImportError):
+            st.error("A Python package is missing. Close this window and double-click start.bat again.")
+            return
+        if getattr(error, "errno", None) == 1049:  # MySQL is fine, the database doesn't exist yet
+            name = os.environ.get("DB_NAME", "job_search_tracker")
+            st.info(f"MySQL is running, but it doesn't have a database called '{name}' yet.")
+            if st.button(f"Create '{name}'", type="primary"):
+                try:
+                    jl.get_db_connection(create_database=True).close()
+                except Exception as e:
+                    st.error(plain_error(e) or str(e))
+                else:
+                    st.rerun()
+            return
+        message = plain_error(error)
+        if message:
+            st.warning(message, icon=":material/warning:")
+        settings_form(first_run=True)
+
+
+def setup_screen(db, tables):
+    _, middle, _ = st.columns([1, 2, 1])
+    with middle:
+        heading("Set up your database", f"Connected to {db.label}. It needs the tracker's tables "
+                                         f"({', '.join(tables)}) before you start.")
+        if st.button("Create the tables", type="primary", icon=":material/table_chart:"):
+            jl.apply_schema_updates(db)
+            st.rerun()
+
+
+def update_banner(db):
+    """Offer the one-time updates older databases need."""
+    _, columns = jl.missing_schema(db)
+    missing_applied = len(db.query(jl.MISSING_APPLIED_SQL))
+    if not columns and not missing_applied:
+        return
+    parts = []
+    if columns:
+        parts.append(f"add the columns {', '.join(columns)}")
+    if missing_applied:
+        parts.append(f"give {missing_applied} older applications their 'Applied' status so the dashboard counts them")
+    with st.container(border=True):
+        text, action = st.columns([5, 1], vertical_alignment="center")
+        text.markdown(f"**One-time database update:** {' and '.join(parts)}. Nothing is deleted or changed.")
+        if action.button("Update now", type="primary", width="stretch"):
+            jl.apply_schema_updates(db)
+            jl.backfill_applied_events(db, assume_yes=True)
+            notify("Database updated")
+            st.rerun()
+
+
+def demo_banner():
+    st.info(f"This is a demo with made-up applications. Try logging a job from a real link, recording an "
+            f"update, or the dashboard; changes stay in this browser tab. [See the code on GitHub]({REPO_URL})",
+            icon=":material/science:")
+
+
 # ---------------------------------------------------------------- Log a job
 
 def start_draft(result):
@@ -193,51 +313,76 @@ def read_into_draft(reader, value):
         with st.spinner("Reading the job posting..."):
             start_draft(reader(value))
     except capture.CaptureError as e:
-        st.session_state["notice_error"] = str(e)
+        st.session_state["problem"] = str(e)
 
 
-def page_log(db):
-    st.title("Log a job")
-    incoming = query_param("url")  # from the "Log this job" bookmark
+def page_log():
+    db = current_db()
+    incoming = st.query_params.get("url")  # from the "Log this job" bookmark
     if incoming:
-        clear_query_params()
+        st.query_params.clear()
         read_into_draft(capture.read_link, incoming)
-        rerun()
+        st.rerun()
 
     draft = st.session_state.get("draft")
     if draft:
-        draft_form(db, draft)
+        draft_view(db, draft)
         return
 
+    heading("Log a job", "Paste the link to a job you applied to. The details fill themselves in.")
     with st.form("link"):
-        url = st.text_input("Job link", placeholder="Paste the link to the job posting")
-        if st.form_submit_button("Read the job", type="primary"):
+        entry, action = st.columns([5, 1], vertical_alignment="bottom")
+        url = entry.text_input("Job link", placeholder="https://careers.example.com/jobs/data-analyst",
+                               icon=":material/link:")
+        if action.form_submit_button("Read job", type="primary", width="stretch"):
             read_into_draft(capture.read_link, url)
-            rerun()
-    if not capture.has_api_key():
-        st.caption("Most job sites work without an API key. Add a Claude API key in Settings to fill in "
-                   "the rest (like the industry) automatically.")
-    with st.expander("No link? Paste the job description instead"):
-        with st.form("paste"):
-            text = st.text_area("Job description", height=200)
-            if st.form_submit_button("Read the description"):
+            st.rerun()
+    paste_col, manual_col, _ = st.columns([1, 1, 3])
+    with paste_col.popover("Paste a description", icon=":material/description:", width="stretch"):
+        with st.form("paste", border=False):
+            text = st.text_area("Job description", height=220, placeholder="Paste the whole posting here")
+            if st.form_submit_button("Read description", type="primary"):
                 read_into_draft(capture.read_text, text)
-                rerun()
-    if st.button("Type the details in myself"):
+                st.rerun()
+    if manual_col.button("Type it in myself", icon=":material/edit_note:", width="stretch"):
         start_draft({"source": ""})
-        rerun()
+        st.rerun()
+    tip = "Works with most career sites, including Greenhouse, LinkedIn, Workday, Lever, Ashby, iCIMS and Oracle."
+    if not capture.has_api_key():
+        tip += " Add a Claude API key in Settings to fill in details some pages leave out, like the industry."
+    st.caption(tip)
+    recent_applications(db)
 
 
-def draft_form(db, draft):
+def recent_applications(db):
+    rows = db.query(jl.CURRENT_STATUS_SQL)[:5]
+    if not rows:
+        return
+    st.subheader("Recently logged")
+    for position, (app_id, company, role, applied, status) in enumerate(rows):
+        status = status or "Applied"
+        with st.container(border=True, key=card_key("jtrecent", position, app_id)):
+            text, badge = st.columns([5, 1], vertical_alignment="center")
+            text.markdown(f"<div class='jt-card-title'>{esc(company)}</div>"
+                          f"<div class='jt-card-role'>{esc(role)} · applied {short_date(applied)}</div>",
+                          unsafe_allow_html=True)
+            with badge:
+                st.badge(status, color=badge_color(status))
+
+
+def draft_view(db, draft):
     key = f"draft{draft['id']}"
-    if draft.get("source"):
-        st.caption(f"Filled in from {draft['source']}. Check everything before saving.")
+    source = draft.get("source")
+    heading("Check the details",
+            f"Filled in from {source}. Change anything that's off, then save." if source else
+            "Fill in the job, then save.")
     if draft.get("warning"):
-        st.warning(draft["warning"])
+        st.warning(draft["warning"], icon=":material/info:")
     existing = jl.match_existing(jl.load_existing(db), draft.get("company_name", ""),
                                  draft.get("role_title", ""), draft.get("url", ""))
     if existing:
-        st.warning(f"You already logged this job ({existing[0]}, applied {existing[1]}).")
+        st.warning(f"You already logged this job ({existing[0]}, applied {existing[1]}).",
+                   icon=":material/content_copy:")
     show_duplicate_box = bool(existing) or st.session_state.get(f"{key}-duplicate")
 
     guess = jl.guess_channel(draft.get("url"))
@@ -246,6 +391,7 @@ def draft_form(db, draft):
     last = last_resume_name(db)
 
     with st.form(key):
+        st.markdown("**The job**")
         left, right = st.columns(2)
         company = left.text_input("Company *", draft.get("company_name", ""))
         role = right.text_input("Role *", draft.get("role_title", ""))
@@ -254,25 +400,29 @@ def draft_form(db, draft):
         pay = second.text_input("Pay", draft.get("salary_range", ""))
         industry = third.text_input("Industry", draft.get("industry", ""))
         url = st.text_input("Job link", draft.get("url", ""))
+
+        st.markdown("**Your application**")
         first, second, third = st.columns(3)
-        applied = first.date_input("Date applied", value=date.today(), max_value=date.today())
+        applied = first.date_input("Date applied", value=date.today(), max_value=date.today(), format="MM/DD/YYYY")
         channel = second.selectbox("Where you found it", channels,
                                    index=channels.index(guess) if guess in channels else 0)
         new_channel = second.text_input("Or a new one", placeholder="e.g. Hospital career site")
         resume = third.selectbox("Resume you sent", resume_options,
                                  index=resume_options.index(last) if last in resume_options else len(resume_options) - 1)
         new_resume = third.text_input("Or a new resume version", max_chars=50, placeholder="e.g. ICU RN")
-        notes = st.text_area("Notes", height=70, placeholder="Referral, recruiter's name, salary you asked for...")
-        description = st.text_area("Job description (kept so you have it for interviews)",
-                                   draft.get("description", ""), height=160)
+        notes = st.text_area("Notes", height=80, placeholder="Referral, recruiter's name, salary you asked for...")
+        with st.expander("Job description (kept so you have it for interviews)", icon=":material/article:"):
+            description = st.text_area("Job description", draft.get("description", ""), height=220,
+                                       label_visibility="collapsed")
         save_anyway = st.checkbox("Log it again anyway") if show_duplicate_box else False
         save_col, cancel_col, _ = st.columns([1, 1, 4])
-        save = save_col.form_submit_button("Save", type="primary")
-        cancel = cancel_col.form_submit_button("Start over")
+        save = save_col.form_submit_button("Save application", type="primary", icon=":material/check:",
+                                           width="stretch")
+        cancel = cancel_col.form_submit_button("Start over", width="stretch")
 
     if cancel:
         st.session_state.pop("draft", None)
-        rerun()
+        st.rerun()
     if not save:
         return
     if not company.strip() or not role.strip():
@@ -281,9 +431,9 @@ def draft_form(db, draft):
     duplicate = jl.match_existing(jl.load_existing(db), company, role, url)
     if duplicate and not save_anyway:
         st.session_state[f"{key}-duplicate"] = True
-        st.session_state["notice_error"] = (f"You already logged this job ({duplicate[0]}, applied {duplicate[1]}). "
-                                            "Tick 'Log it again anyway' and save again to keep both.")
-        rerun()
+        st.session_state["problem"] = (f"You already logged this job ({duplicate[0]}, applied {duplicate[1]}). "
+                                       "Tick 'Log it again anyway' and save again to keep both.")
+        st.rerun()
     app_id = jl.insert_application(db, {
         "company_name": company.strip(),
         "role_title": role.strip(),
@@ -298,30 +448,84 @@ def draft_form(db, draft):
         "job_description": description.strip() or None,
     })
     st.session_state.pop("draft", None)
-    st.session_state["notice"] = f"Logged {company.strip()} - {role.strip()} as application #{app_id}."
-    rerun()
+    notify(f"Logged {company.strip()} as application #{app_id}")
+    st.rerun()
 
 
 # ---------------------------------------------------------------- Pipeline
 
-def page_pipeline(db):
-    st.title("Pipeline")
-    apps, events = analytics.load(db)
-    if apps.empty:
-        st.info("No applications yet. Log your first one on the 'Log a job' page.")
-        return
-    summary = analytics.summarize(apps, events)
+def reset_table_selection():
+    st.session_state["table_version"] = st.session_state.get("table_version", 0) + 1
 
-    search_col, status_col = st.columns([2, 3])
-    search = search_col.text_input("Search", placeholder="Company or role")
-    chosen = status_col.multiselect("Current status", sorted(summary["status"].unique()))
+
+@st.dialog("Record an update", on_dismiss=reset_table_selection)
+def update_dialog(application_id):
+    # Dialogs rerun on their own, after the main run has closed its connection, so open one here
+    db, close_after = open_db()
+    try:
+        rows = db.query("SELECT company_name, role_title, job_posting_url FROM applications "
+                        "WHERE application_id = %s", (application_id,))
+        if not rows:
+            st.error("That application isn't there anymore.")
+            return
+        company, role, link = rows[0]
+        history = db.query("SELECT status, event_date FROM status_events WHERE application_id = %s "
+                           "ORDER BY event_date, status_event_id", (application_id,))
+        st.markdown(f"**{esc(company)}**<br><span class='jt-card-role'>{esc(role)}</span>", unsafe_allow_html=True)
+        if history:
+            st.markdown("<div class='jt-history'>" + " → ".join(f"{esc(status)} ({short_date(when)})"
+                                                                for status, when in history) + "</div>",
+                        unsafe_allow_html=True)
+        if link and link.startswith(("http://", "https://")):
+            st.link_button("Open the posting", link, icon=":material/open_in_new:")
+        with st.form("update-form", border=False):
+            status = st.selectbox("What happened", jl.update_statuses(db))
+            custom = st.text_input("Or type your own", placeholder="e.g. Skills test")
+            when = st.date_input("When", value=date.today(), format="MM/DD/YYYY")
+            notes = st.text_area("Notes", height=90, placeholder="Who you talked to, next steps...")
+            if st.form_submit_button("Save update", type="primary", width="stretch"):
+                status = jl.normalize_status(custom) if custom.strip() else status
+                jl.add_status(db, application_id, status, when, notes.strip() or None)
+                reset_table_selection()
+                if status == "Offer":
+                    st.session_state["celebrate"] = True
+                    notify(f"An offer from {company}. Congratulations!", icon=":material/celebration:")
+                else:
+                    notify(f"{company} is now '{status}'")
+                st.rerun()
+    finally:
+        if close_after:
+            db.close()
+
+
+def application_card(row, position):
+    with st.container(border=True, key=card_key("jtcard", position, row.application_id)):
+        st.markdown(f"<div class='jt-card-title'>{esc(row.company)}</div>"
+                    f"<div class='jt-card-role'>{esc(row.role)}</div>", unsafe_allow_html=True)
+        st.badge(row.status, color=badge_color(row.status))
+        st.caption(f"{short_date(row.date_applied)} · {esc(row.channel)}")
+        if st.button("Update", key=f"update-{row.application_id}", icon=":material/edit:", type="tertiary"):
+            update_dialog(int(row.application_id))
+
+
+def pipeline_board(summary):
+    summary = summary.assign(column=summary["status"].map(board_column))
+    for (name, _, _), area in zip(BOARD, st.columns(len(BOARD), gap="small")):
+        rows = summary[summary["column"] == name].sort_values(["status_date", "application_id"], ascending=False)
+        with area:
+            st.markdown(f"<div class='jt-col-head'><span>{name}</span><span class='jt-count'>{len(rows)}</span></div>",
+                        unsafe_allow_html=True)
+            with st.container(height=680, border=False):
+                for position, row in enumerate(rows.head(CARDS_PER_COLUMN).itertuples()):
+                    application_card(row, position)
+                if len(rows) > CARDS_PER_COLUMN:
+                    st.caption(f"+{len(rows) - CARDS_PER_COLUMN} more in the Table view")
+                if rows.empty:
+                    st.caption("Nothing here yet")
+
+
+def pipeline_table(summary):
     view = summary.sort_values(["date_applied", "application_id"], ascending=False)
-    if search.strip():
-        text = (view["company"] + " " + view["role"]).str.lower()
-        view = view[text.str.contains(search.strip().lower(), regex=False)]
-    if chosen:
-        view = view[view["status"].isin(chosen)]
-
     table = pd.DataFrame({
         "#": view["application_id"],
         "Applied": view["date_applied"].dt.date,
@@ -333,45 +537,45 @@ def page_pipeline(db):
         "Resume": view["resume_version"],
         "Link": view["link"],
     })
-    st.dataframe(table, use_container_width=True, hide_index=True, column_config={"Link": link_column("Link")})
-    st.caption(f"{len(view)} of {len(summary)} applications")
+    st.caption("Tick the box at the start of a row to record an update.")
+    event = st.dataframe(table, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row",
+                         key=f"pipeline-table-{st.session_state.get('table_version', 0)}",
+                         column_config={"Link": st.column_config.LinkColumn("Link", display_text="Open"),
+                                        "Applied": st.column_config.DateColumn("Applied", format="MMM D, YYYY"),
+                                        "Since": st.column_config.DateColumn("Since", format="MMM D")})
+    if event.selection.rows:
+        update_dialog(int(table.iloc[event.selection.rows[0]]["#"]))
 
-    st.subheader("Record an update")
-    if view.empty:
-        st.caption("No applications match the filters above.")
+
+def page_pipeline():
+    db = current_db()
+    heading("Pipeline", "Every application and where it stands.")
+    apps, events = analytics.load(db)
+    if apps.empty:
+        st.info("No applications yet. Log your first one on the Log a job page.", icon=":material/inbox:")
         return
-    labels = {int(row.application_id): f"#{row.application_id}  {row.company} - {row.role}  ({row.status})"
-              for row in view.itertuples()}
-    with st.form("update"):
-        application = st.selectbox("Application", list(labels), format_func=labels.get)
-        pick_col, date_col, notes_col = st.columns([2, 1, 3])
-        status = pick_col.selectbox("What happened", jl.update_statuses(db))
-        custom = pick_col.text_input("Or type your own", placeholder="e.g. Skills test")
-        when = date_col.date_input("When", value=date.today())
-        notes = notes_col.text_area("Notes", height=108, placeholder="Who you talked to, next steps...")
-        if st.form_submit_button("Save update", type="primary"):
-            status = jl.normalize_status(custom) if custom.strip() else status
-            jl.add_status(db, application, status, when, notes.strip() or None)
-            row = summary[summary["application_id"] == application].iloc[0]
-            st.session_state["notice"] = f"Saved: {row['company']} - {row['role']} is now '{status}' ({when})."
-            rerun()
-
-    with st.expander("Recent updates"):
-        recent = (events.sort_values(["event_date", "event_id"], ascending=False).head(25)
-                  .merge(apps[["application_id", "company", "role"]], on="application_id"))
-        st.dataframe(pd.DataFrame({
-            "Date": recent["event_date"].dt.date,
-            "Company": recent["company"],
-            "Role": recent["role"],
-            "Status": recent["status"],
-            "Notes": recent["notes"].fillna(""),
-        }), use_container_width=True, hide_index=True)
+    summary = analytics.summarize(apps, events)
+    search_col, view_col = st.columns([4, 1], vertical_alignment="bottom")
+    search = search_col.text_input("Search", placeholder="Search by company or role", icon=":material/search:",
+                                   label_visibility="collapsed")
+    view = view_col.segmented_control("View", ["Board", "Table"], default="Board", required=True,
+                                      label_visibility="collapsed", key="pipeline-view")
+    if search.strip():
+        text = (summary["company"] + " " + summary["role"]).str.lower()
+        summary = summary[text.str.contains(search.strip().lower(), regex=False)]
+        if summary.empty:
+            st.caption("No applications match that search.")
+            return
+    if view == "Table":
+        pipeline_table(summary)
+    else:
+        pipeline_board(summary)
 
 
 # ---------------------------------------------------------------- Dashboard
 
 def styled(chart, height):
-    return (chart.properties(height=height)
+    return (chart.properties(height=height, padding={"left": 8, "right": 8, "top": 4, "bottom": 4})
             .configure(font=FONT, background="transparent")
             .configure_view(strokeWidth=0)
             .configure_axis(labelColor=MUTED, titleColor=INK_2, gridColor=GRID, gridWidth=1, domainColor=AXIS,
@@ -392,7 +596,7 @@ def funnel_chart(data):
     bars = base.mark_bar(size=22, cornerRadiusEnd=4).encode(
         color=alt.Color("stage:N", scale=alt.Scale(domain=analytics.FUNNEL, range=FUNNEL_BLUES), legend=None))
     labels = base.mark_text(align="left", dx=6, color=INK_2).encode(text="label:N")
-    return styled(bars + labels, 200)  # same height as the weekly chart beside it
+    return styled(bars + labels, 200)
 
 
 def weekly_chart(data):
@@ -437,117 +641,86 @@ def rates_table(data, label):
     })
 
 
-def page_dashboard(db):
-    st.title("Dashboard")
+def chart_card(title, chart, table):
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+        st.altair_chart(chart, width="stretch", theme=None)
+        with st.expander("Show as a table"):
+            st.dataframe(table, hide_index=True, width="stretch")
+
+
+PERIODS = {"Last 30 days": 30, "Last 90 days": 90, "All time": None}
+
+
+def page_dashboard():
+    db = current_db()
+    heading("Dashboard", "What's working in your search.")
     apps, events = analytics.load(db)
     if apps.empty:
-        st.info("Nothing to show yet. Log a few applications first.")
+        st.info("Nothing to show yet. Log a few applications first.", icon=":material/insights:")
         return
+    period = st.segmented_control("Period", list(PERIODS), default="All time", required=True,
+                                  label_visibility="collapsed", key="dashboard-period")
+    days = PERIODS[period]
+    if days:
+        apps = apps[apps["date_applied"] >= pd.Timestamp(date.today() - timedelta(days=days))]
+        events = events[events["application_id"].isin(apps["application_id"])]
+        if apps.empty:
+            st.info("No applications in this period.", icon=":material/event_busy:")
+            return
     summary = analytics.summarize(apps, events)
     numbers = analytics.kpis(summary)
     tiles = st.columns(5)
-    tiles[0].metric("Applications", f"{numbers['applications']:,}")
-    tiles[1].metric("This week", numbers["this_week"])
-    tiles[2].metric("Response rate", percent(numbers["response_rate"]),
+    tiles[0].metric("Applications", f"{numbers['applications']:,}", border=True)
+    tiles[1].metric("This week", numbers["this_week"], border=True)
+    tiles[2].metric("Response rate", percent(numbers["response_rate"]), border=True,
                     help="Share of applications where the employer replied in any way, rejections included.")
-    tiles[3].metric("Interview rate", percent(numbers["interview_rate"]),
+    tiles[3].metric("Interview rate", percent(numbers["interview_rate"]), border=True,
                     help="Share of applications that reached an interview or an offer.")
-    tiles[4].metric("No word in 3+ weeks", numbers["no_word"],
+    tiles[4].metric("No word in 3+ weeks", numbers["no_word"], border=True,
                     help="Applied 21 or more days ago with no update since.")
 
+    stages = analytics.funnel(summary)
+    weeks = analytics.weekly(summary)
     left, right = st.columns(2)
     with left:
-        st.subheader("How far applications get")
-        stages = analytics.funnel(summary)
-        st.altair_chart(funnel_chart(stages), use_container_width=True, theme=None)
-        with st.expander("Show as a table"):
-            st.dataframe(stages.assign(share=stages["share"].map(percent)).rename(
-                columns={"stage": "Stage", "applications": "Applications", "share": "Share of all"}),
-                use_container_width=True, hide_index=True)
+        chart_card("How far applications get", funnel_chart(stages),
+                   stages.assign(share=stages["share"].map(percent)).rename(
+                       columns={"stage": "Stage", "applications": "Applications", "share": "Share of all"}))
     with right:
-        st.subheader("Applications per week")
-        weeks = analytics.weekly(summary)
-        st.altair_chart(weekly_chart(weeks), use_container_width=True, theme=None)
-        with st.expander("Show as a table"):
-            st.dataframe(pd.DataFrame({"Week of": weeks["week"].dt.date, "Applications": weeks["applications"],
-                                       "Running total": weeks["running_total"]}),
-                         use_container_width=True, hide_index=True)
-
+        chart_card("Applications per week", weekly_chart(weeks),
+                   pd.DataFrame({"Week of": weeks["week"].dt.date, "Applications": weeks["applications"],
+                                 "Running total": weeks["running_total"]}))
     left, right = st.columns(2)
     for column, title, label, area in (("resume_version", "Response rate by resume", "Resume", left),
                                        ("channel", "Response rate by channel", "Channel", right)):
+        rates = analytics.rates_by(summary, column)
         with area:
-            st.subheader(title)
-            rates = analytics.rates_by(summary, column)
-            st.altair_chart(rate_chart(rates, column), use_container_width=True, theme=None)
-            with st.expander("Show as a table"):
-                st.dataframe(rates_table(rates, label), use_container_width=True, hide_index=True)
+            chart_card(title, rate_chart(rates, column), rates_table(rates, label))
 
     left, right = st.columns(2)
-    with left:
-        st.subheader("No word in 3+ weeks")
+    with left.container(border=True):
+        st.markdown("**No word in 3+ weeks**")
         quiet = analytics.waiting(summary)
         if quiet.empty:
             st.caption("Nothing waiting that long.")
         else:
             st.dataframe(pd.DataFrame({"Company": quiet["company"], "Days": quiet["days_since_applied"],
                                        "Applied": quiet["date_applied"].dt.date, "Role": quiet["role"]}),
-                         use_container_width=True, hide_index=True)
+                         hide_index=True, width="stretch")
             st.caption("Worth a follow-up, or mark them Ghosted on the Pipeline page.")
-    with right:
-        st.subheader("Time to first reply")
+    with right.container(border=True):
+        st.markdown("**Time to first reply**")
         replies = analytics.reply_times(summary)
         if replies.empty:
             st.caption("No replies recorded yet. Add them on the Pipeline page as they come in.")
         else:
             st.dataframe(pd.DataFrame({"Company": replies["company"], "Days": replies["days_to_reply"].astype(int),
                                        "Now": replies["status"], "Role": replies["role"]}),
-                         use_container_width=True, hide_index=True)
+                         hide_index=True, width="stretch")
 
 
 # ---------------------------------------------------------------- Settings
-
-def page_settings(db):
-    st.title("Settings")
-    st.caption(f"Connected to {db.label}.")
-
-    st.subheader("Connection and API key")
-    settings_form()
-
-    st.subheader("Resume versions")
-    counts = db.query("SELECT rv.version_name, COUNT(a.application_id) FROM resume_versions rv "
-                      "LEFT JOIN applications a ON a.resume_version_id = rv.resume_version_id "
-                      "GROUP BY rv.resume_version_id, rv.version_name ORDER BY rv.resume_version_id")
-    if counts:
-        st.dataframe(pd.DataFrame(counts, columns=["Resume version", "Applications"]), hide_index=True)
-    with st.form("new-resume", clear_on_submit=True):
-        name = st.text_input("Add a resume version", max_chars=50,
-                             placeholder="e.g. Data Analytics, ICU RN, Retail management")
-        if st.form_submit_button("Add") and name.strip():
-            jl.resolve_resume_version(db, name.strip(), {})
-            db.commit()
-            st.session_state["notice"] = f"Added the resume version '{name.strip()}'."
-            rerun()
-
-    st.subheader("Import from a spreadsheet")
-    st.caption("Save your sheet as CSV (Excel: File > Save As > CSV; Google Sheets: File > Download > CSV). "
-               "It needs columns for company, role and date applied; link, channel, pay, status and notes are used too.")
-    upload = st.file_uploader("CSV file", type=["csv"])
-    if upload is not None:
-        import_preview(db, jl.decode_csv(upload.getvalue()))
-
-    st.subheader("Export")
-    rows = jl.export_rows(db)
-    st.download_button(f"Download all {len(rows)} applications (CSV)", data=jl.export_csv_bytes(rows),
-                       file_name=f"applications_{date.today()}.csv", mime="text/csv", disabled=not rows)
-
-    st.subheader("'Log this job' bookmark")
-    port = st.get_option("server.port") or 8501
-    st.write("Make a bookmark in your browser, name it **Log this job**, and paste this as its address. "
-             "Clicking it on any job posting opens the tracker with that job filled in.")
-    st.code(f"javascript:void(window.open('http://localhost:{port}/?url='+encodeURIComponent(location.href)))",
-            language="text")
-
 
 def import_preview(db, rows):
     if not rows:
@@ -558,8 +731,8 @@ def import_preview(db, rows):
         st.error(f"Couldn't find a column for: {', '.join(plan['missing'])}. "
                  f"The file's columns are: {', '.join(plan['headers'])}")
         return
-    st.write(f"**{len(plan['new'])} new**, {len(plan['duplicates'])} already logged, "
-             f"{len(plan['problems'])} with problems.")
+    st.markdown(f"**{len(plan['new'])} new**, {len(plan['duplicates'])} already logged, "
+                f"{len(plan['problems'])} with problems.")
     if plan["duplicates"] or plan["problems"]:
         with st.expander("Details"):
             st.text("\n".join(plan["problems"] + plan["duplicates"]))
@@ -570,38 +743,87 @@ def import_preview(db, rows):
         options = [name for _, name in resume_versions(db)] + [NO_RESUME]
         picked = st.selectbox("Resume version for these applications", options, index=len(options) - 1)
         default_resume_id = resume_id_for(db, picked, "")
-    if st.button(f"Import {len(plan['new'])} applications", type="primary"):
+    if st.button(f"Import {len(plan['new'])} applications", type="primary", icon=":material/upload:"):
         try:
             added = jl.run_import(db, plan, default_resume_id)
         except RuntimeError as e:
             st.error(str(e))
         else:
-            st.session_state["notice"] = f"Imported {added} applications."
-            rerun()
+            notify(f"Imported {added} applications")
+            st.rerun()
+
+
+def page_settings():
+    db = current_db()
+    demo = st.session_state.get("demo")
+    heading("Settings")
+    connection, resumes, files, bookmark = st.tabs(["Connection", "Resume versions", "Import & export",
+                                                    "Log this job bookmark"])
+    with connection:
+        if demo:
+            st.info(f"This demo runs on made-up data, so there's no database to connect. To track your own "
+                    f"search, get the app from [GitHub]({REPO_URL}) and run it on your computer.",
+                    icon=":material/science:")
+        else:
+            st.caption(f"Connected to {db.label}.")
+            settings_form()
+    with resumes:
+        counts = db.query("SELECT rv.version_name, COUNT(a.application_id) FROM resume_versions rv "
+                          "LEFT JOIN applications a ON a.resume_version_id = rv.resume_version_id "
+                          "GROUP BY rv.resume_version_id, rv.version_name ORDER BY rv.resume_version_id")
+        if counts:
+            st.dataframe(pd.DataFrame(counts, columns=["Resume version", "Applications"]), hide_index=True)
+        with st.form("new-resume", clear_on_submit=True):
+            name = st.text_input("Add a resume version", max_chars=50,
+                                 placeholder="e.g. Data Analytics, ICU RN, Retail management")
+            if st.form_submit_button("Add", icon=":material/add:") and name.strip():
+                jl.resolve_resume_version(db, name.strip(), {})
+                db.commit()
+                notify(f"Added '{name.strip()}'")
+                st.rerun()
+    with files:
+        st.markdown("**Import from a spreadsheet**")
+        st.caption("Save your sheet as CSV (Excel: File > Save As > CSV; Google Sheets: File > Download > CSV). "
+                   "It needs columns for company, role and date applied; link, channel, pay, status and notes "
+                   "are used too.")
+        upload = st.file_uploader("CSV file", type=["csv"], label_visibility="collapsed")
+        if upload is not None:
+            import_preview(db, jl.decode_csv(upload.getvalue()))
+        st.divider()
+        st.markdown("**Export**")
+        rows = jl.export_rows(db)
+        st.download_button(f"Download all {len(rows)} applications (CSV)", data=jl.export_csv_bytes(rows),
+                           file_name=f"applications_{date.today()}.csv", mime="text/csv", disabled=not rows,
+                           icon=":material/download:")
+    with bookmark:
+        if demo:
+            st.caption("The bookmark opens the app running on your own computer, so it isn't part of the demo.")
+        else:
+            port = st.get_option("server.port") or 8501
+            st.write("Make a bookmark in your browser, name it **Log this job**, and paste this as its address. "
+                     "Clicking it on any job posting opens the tracker with that job filled in.")
+            st.code(f"javascript:void(window.open('http://localhost:{port}/?url='"
+                    f"+encodeURIComponent(location.href)))", language="text")
 
 
 # ---------------------------------------------------------------- main
 
-def show_notices():
-    notice, problem = st.session_state.pop("notice", None), st.session_state.pop("notice_error", None)
-    if notice:
-        st.success(notice)
-    if problem:
-        st.error(problem)
+PAGES = [
+    (page_log, "Log a job", ":material/add_link:", "log"),
+    (page_pipeline, "Pipeline", ":material/view_kanban:", "pipeline"),
+    (page_dashboard, "Dashboard", ":material/insights:", "dashboard"),
+    (page_settings, "Settings", ":material/settings:", "settings"),
+]
 
 
-def main():
+def main(demo=False):
+    st.set_page_config(page_title="Job Search Tracker", page_icon=":material/work_history:", layout="wide")
+    st.markdown(CSS, unsafe_allow_html=True)
+    if demo:
+        st.session_state["demo"] = True
     jl.load_env()
-    if query_param("url"):
-        st.session_state["page"] = "Log a job"
-    elif query_param("page") in PAGES:  # e.g. http://localhost:8501/?page=Dashboard
-        st.session_state["page"] = query_param("page")
-        clear_query_params()
-    with st.sidebar:
-        st.markdown("### Job Search Tracker")
-        page = st.radio("Page", PAGES, key="page", label_visibility="collapsed")
     try:
-        db = connect()
+        db, close_after = open_db()
     except Exception as e:
         show_notices()
         connection_screen(e)
@@ -612,13 +834,21 @@ def main():
             setup_screen(db, tables)
             return
         jl.load_optional_columns(db)
+        st.session_state["_db"] = db
+        navigation = st.navigation(
+            [st.Page(page, title=title, icon=icon, url_path=path, default=index == 0)
+             for index, (page, title, icon, path) in enumerate(PAGES)],
+            position="top")
         show_notices()
-        update_banner(db)
-        {"Log a job": page_log, "Pipeline": page_pipeline, "Dashboard": page_dashboard,
-         "Settings": page_settings}[page](db)
-        st.sidebar.caption(f"Connected to {db.label}")
+        if demo:
+            demo_banner()
+        else:
+            update_banner(db)
+        navigation.run()
     finally:
-        db.close()
+        if close_after:
+            db.close()
 
 
-main()
+if __name__ == "__main__":
+    main()
