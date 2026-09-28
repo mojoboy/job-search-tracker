@@ -1,10 +1,31 @@
-# Job Search Tracker
+<p align="center"><img src="assets/logo.svg" width="72" alt=""></p>
 
-Track job applications and what happens to them without writing SQL. Paste a job link and the details fill themselves in, move applications across a board as replies come in, and see which resumes and channels actually get responses. It works for any field: you name your own resume versions, channels and stages.
+<h1 align="center">Job Search Tracker</h1>
 
-**[Try the live demo](https://mojoboy-job-tracker.streamlit.app)** (made-up sample data; your changes stay in your browser tab)
+<p align="center">
+  Log a job from its link, track every reply, and see what's actually working in your search.<br>
+  No spreadsheets, no SQL, and it works for any field.
+</p>
 
-![The dashboard, shown with sample data](docs/dashboard.png)
+<p align="center">
+  <a href="https://mojoboy-job-tracker.streamlit.app"><img src="https://img.shields.io/badge/Try_the_live_demo-%E2%86%97-8B7CFF?style=for-the-badge&labelColor=8B7CFF&color=6655E6" alt="Try the live demo"></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-15151D?style=flat-square&logo=python&logoColor=white" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/Streamlit-1.46%2B-15151D?style=flat-square&logo=streamlit&logoColor=white" alt="Streamlit">
+  <img src="https://img.shields.io/badge/MySQL-8-15151D?style=flat-square&logo=mysql&logoColor=white" alt="MySQL 8">
+  <img src="https://img.shields.io/badge/pandas-analysis-15151D?style=flat-square&logo=pandas&logoColor=white" alt="pandas">
+  <img src="https://img.shields.io/badge/Claude_API-optional-15151D?style=flat-square&logo=anthropic&logoColor=white" alt="Claude API (optional)">
+</p>
+
+![The dashboard: response and interview rates, how far applications get, and applications per week (sample data)](docs/dashboard.jpg)
+
+Paste a job link and the company, role, location, pay and description fill themselves in. Move applications across a board as replies come in, and the dashboard shows which resume versions and channels actually get responses. You name your own resume versions, channels and hiring stages, so it fits a nurse's or a teacher's search as well as an analyst's.
+
+The **[live demo](https://mojoboy-job-tracker.streamlit.app)** runs on made-up sample data (the companies are fictional), and anything you change stays in your browser tab.
+
+![The pipeline board: Applied, In conversation, Interviewing, Offer and Closed (sample data)](docs/pipeline.jpg)
 
 ## Start it
 

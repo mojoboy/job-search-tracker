@@ -23,12 +23,14 @@ import job_logger as jl
 import sample_data
 
 REPO_URL = "https://github.com/mojoboy/job-search-tracker"
+AUTHOR_URL = "https://mojoboy.github.io"
+LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "logo.svg")
 NO_RESUME = "No resume version"
 
-# Chart colors, checked for contrast and color-blind safety on the app's #fcfcfb background
-BLUE = "#2a78d6"                                            # the single series color
-FUNNEL_BLUES = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab"]  # one hue, light (first stage) to dark
-INK_2, MUTED, GRID, AXIS = "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
+# Chart colors, checked for contrast and color-blind safety on the app's #0B0B10 background
+ACCENT = "#8B7CFF"                                              # the single series color (6:1 on the background)
+FUNNEL_SHADES = ["#4A3DB0", "#6655E6", "#8B7CFF", "#B9AEFF"]    # one hue, dim (first stage) to bright (offer)
+INK_2, MUTED, GRID, AXIS = "#A1A1AA", "#8B8B96", "#22222B", "#2E2E38"
 # System fonts for charts: they measure label widths before web fonts load, so Inter would get clipped
 FONT = "system-ui, -apple-system, 'Segoe UI', sans-serif"
 
@@ -41,51 +43,183 @@ BOARD = [
     ("Offer", "green", {"Offer"}),
     ("Closed", "red", {"Rejected", "Ghosted", "Withdrawn"}),
 ]
+DOT_COLORS = {"gray": "#8B8B96", "blue": "#60A5FA", "violet": "#A99CFF", "green": "#4ADE80", "red": "#F87171"}
 CARDS_PER_COLUMN = 25
+
+NOISE = ("url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E"
+         "%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' "
+         "stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.07 0'/%3E"
+         "%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E\")")
 
 CSS = """
 <style>
-[data-testid="stMainBlockContainer"], .block-container { padding-top: 2.4rem; padding-bottom: 4rem; max-width: 1240px; }
-h1 { letter-spacing: -0.02em; }
-.jt-subtitle { color: #52514e; font-size: 1.05rem; margin: -0.5rem 0 1.5rem; }
+:root {
+  --jt-bg: #0B0B10; --jt-surface: #111118; --jt-line: #24242E;
+  --jt-ink: #F4F4F6; --jt-ink-2: #A1A1AA; --jt-violet: #8B7CFF; --jt-violet-hi: #B9AEFF;
+  --jt-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+::selection { background: rgba(139, 124, 255, 0.35); color: #FFFFFF; }
+.stApp * { scrollbar-width: thin; scrollbar-color: #2E2E3A transparent; }
+
+/* ---- backdrop: violet and cyan light, a fine grid behind the title, a little film grain ---- */
+.stApp {
+  background:
+    """ + NOISE + """ repeat,
+    radial-gradient(1100px 520px at 18% -12%, rgba(139, 124, 255, 0.17), transparent 62%),
+    radial-gradient(900px 420px at 92% -8%, rgba(34, 211, 238, 0.08), transparent 60%),
+    var(--jt-bg);
+}
+.stApp::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none;
+  background-image: linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+  background-size: 56px 56px; background-position: center top;
+  -webkit-mask-image: radial-gradient(ellipse 55% 40% at 50% 0%, #000 15%, transparent 70%);
+          mask-image: radial-gradient(ellipse 55% 40% at 50% 0%, #000 15%, transparent 70%);
+}
+
+/* ---- header: frosted glass, the current page lit up ---- */
+[data-testid="stHeader"] {
+  background: rgba(11, 11, 16, 0.62);
+  -webkit-backdrop-filter: saturate(160%) blur(16px); backdrop-filter: saturate(160%) blur(16px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+/* the app's name beside the logo (the logo is a link on every page but the first) */
+[data-testid="stHeader"] :has(> [data-testid="stHeaderLogo"]) { display: inline-flex; align-items: center; gap: 0.65rem; }
+[data-testid="stHeader"] :has(> [data-testid="stHeaderLogo"])::after {
+  content: "Job Search Tracker"; color: var(--jt-ink); font-weight: 600; font-size: 0.95rem; letter-spacing: -0.01em;
+  white-space: nowrap; padding-right: 1.1rem; margin-right: 0.4rem; border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+@media (max-width: 640px) { [data-testid="stHeader"] :has(> [data-testid="stHeaderLogo"])::after { content: none; } }
+[data-testid="stTopNavLink"] { border-radius: 999px; transition: background-color 0.2s ease, box-shadow 0.2s ease; }
+[data-testid="stTopNavLink"]:hover { background: rgba(255, 255, 255, 0.05); }
+[data-testid="stTopNavLink"][aria-current="page"] {
+  background: rgba(139, 124, 255, 0.14); box-shadow: inset 0 0 0 1px rgba(139, 124, 255, 0.4);
+}
+[data-testid="stMainBlockContainer"], .block-container { padding-top: 5.5rem; padding-bottom: 3rem; max-width: 1240px; }
+
+/* ---- type ---- */
+h1 {
+  letter-spacing: -0.04em; font-weight: 700;
+  background: linear-gradient(100deg, #FFFFFF 0%, #FFFFFF 40%, #D6CFFF 50%, #FFFFFF 60%, #FFFFFF 100%);
+  background-size: 260% 100%; background-position: 0 0;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: jt-sheen 1.8s var(--jt-ease) 0.3s both;
+}
+.jt-eyebrow {
+  display: flex; align-items: center; gap: 0.6rem; margin: 0 0 -0.7rem;
+  font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.74rem; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--jt-violet-hi);
+}
+.jt-eyebrow::before { content: ""; width: 26px; height: 1px; background: linear-gradient(90deg, transparent, var(--jt-violet)); }
+.jt-subtitle { color: var(--jt-ink-2); font-size: 1.05rem; margin: -0.5rem 0 1.5rem; }
 .jt-col-head { display: flex; justify-content: space-between; align-items: center; font-weight: 600;
-               font-size: 0.92rem; padding: 0 0.2rem 0.5rem; }
-.jt-count { background: #f0efec; color: #52514e; border-radius: 999px; padding: 0 0.55rem; font-size: 0.78rem; }
-.jt-card-title { font-weight: 600; line-height: 1.3; }
-.jt-card-role { color: #52514e; font-size: 0.88rem; line-height: 1.35; }
-.jt-history { color: #52514e; font-size: 0.9rem; margin: 0.2rem 0 0.8rem; }
+               font-size: 0.9rem; padding: 0 0.2rem 0.5rem; color: var(--jt-ink); }
+.jt-col-head > span:first-child { display: inline-flex; align-items: center; gap: 0.55rem; }
+.jt-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--c); box-shadow: 0 0 10px var(--c); }
+.jt-count { background: #1C1C26; color: var(--jt-ink-2); border: 1px solid #2A2A35; border-radius: 999px;
+            padding: 0 0.55rem; font-size: 0.76rem; font-family: 'Geist Mono', ui-monospace, monospace; }
+.jt-card-title { font-weight: 600; line-height: 1.3; color: var(--jt-ink); }
+.jt-card-role { color: var(--jt-ink-2); font-size: 0.88rem; line-height: 1.35; }
+.jt-history { color: var(--jt-ink-2); font-size: 0.9rem; margin: 0.2rem 0 0.8rem; }
+
+/* ---- the demo's "sample data" banner and footer ---- */
+.jt-demo { display: flex; gap: 0.8rem; align-items: center; flex-wrap: wrap; padding: 0.7rem 1rem;
+           border: 1px solid rgba(139, 124, 255, 0.35); border-radius: 0.9rem; margin-bottom: 1.4rem;
+           background: linear-gradient(90deg, rgba(139, 124, 255, 0.13), rgba(139, 124, 255, 0.03));
+           color: #D4D4D8; font-size: 0.92rem; }
+.jt-demo b { color: var(--jt-ink); }
+.jt-demo a, .jt-footer a { color: var(--jt-violet-hi); }
+.jt-tag { font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.72rem; letter-spacing: 0.08em;
+          text-transform: uppercase; color: var(--jt-bg); background: var(--jt-violet); border-radius: 999px;
+          padding: 0.15rem 0.6rem; animation: jt-breathe 3.2s ease-in-out infinite; }
+.jt-footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; margin-top: 3rem;
+             padding-top: 1.1rem; border-top: 1px solid var(--jt-line); color: #8B8B96;
+             font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.75rem; letter-spacing: 0.02em; }
+.jt-footer a { text-decoration: none; }
+.jt-footer a:hover { text-decoration: underline; }
+
+/* ---- surfaces: quiet cards that light up violet when you point at them ---- */
+[class*="st-key-jtcard"], [class*="st-key-jtrecent"], [data-testid="stMetric"] {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0) 55%), var(--jt-surface);
+}
+[class*="st-key-jtcard"]:hover, [class*="st-key-jtrecent"]:hover, [data-testid="stMetric"]:hover {
+  border-color: rgba(139, 124, 255, 0.55) !important;
+}
+[data-testid="stMetric"] { position: relative; overflow: hidden; }
+[data-testid="stMetric"]::after {
+  content: ""; position: absolute; left: 14%; right: 14%; top: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(185, 174, 255, 0.75), transparent);
+}
+[data-testid="stMetricValue"] { font-variant-numeric: tabular-nums; letter-spacing: -0.035em; font-weight: 600; }
+@media (max-width: 640px) {  /* two number tiles per row on phones instead of one */
+  [data-testid="stColumn"]:has(> [data-testid="stVerticalBlock"] [data-testid="stMetric"]) {
+    min-width: calc(50% - 0.5rem) !important; flex: 1 1 calc(50% - 0.5rem) !important;
+  }
+}
+[data-testid="stDialog"] {
+  background: rgba(5, 5, 8, 0.55) !important; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+}
+[data-testid="stDialog"] > div {
+  background: var(--jt-surface) !important; border: 1px solid rgba(139, 124, 255, 0.28);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.65), 0 0 70px rgba(139, 124, 255, 0.14) !important;
+  animation: jt-pop 0.35s var(--jt-ease) both;
+}
+[data-testid="stToast"] { background: #15151D !important; border: 1px solid rgba(139, 124, 255, 0.35); }
+
+/* ---- primary buttons: violet with dark text (6:1); the label rolls over when you point at it ---- */
+.stButton button[kind="primary"], .stFormSubmitButton button[kind="primaryFormSubmit"],
+.stDownloadButton button[kind="primary"] {
+  color: var(--jt-bg) !important; font-weight: 600; border: 0 !important;
+  background: linear-gradient(180deg, #A395FF, #8B7CFF) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 0 0 1px rgba(139, 124, 255, 0.5);
+}
+button[kind="primary"] [data-testid="stMarkdownContainer"],
+button[kind="primaryFormSubmit"] [data-testid="stMarkdownContainer"] { overflow: hidden; }
+button[kind="primary"] [data-testid="stMarkdownContainer"] p,
+button[kind="primaryFormSubmit"] [data-testid="stMarkdownContainer"] p {
+  margin: 0; line-height: 1.5; text-shadow: 0 1.5em 0 currentColor; transition: transform 0.45s var(--jt-ease);
+}
+button[kind="primary"]:hover [data-testid="stMarkdownContainer"] p,
+button[kind="primaryFormSubmit"]:hover [data-testid="stMarkdownContainer"] p { transform: translateY(-1.5em); }
 
 /* ---- motion: pages glide in, cards arrive one after another, things lift when you point at them ---- */
-@keyframes jt-rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes jt-rise { from { opacity: 0; transform: translateY(14px); filter: blur(6px); }
+                     to { opacity: 1; transform: none; filter: none; } }
 @keyframes jt-pop { from { opacity: 0; transform: translateY(10px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes jt-sheen { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@keyframes jt-breathe { 0%, 100% { box-shadow: 0 0 12px rgba(139, 124, 255, 0.4); }
+                        50% { box-shadow: 0 0 24px rgba(139, 124, 255, 0.85); } }
 [data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > * {
-  animation: jt-rise 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation: jt-rise 0.6s var(--jt-ease) both;
 }
 [data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(2) { animation-delay: 60ms; }
 [data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(3) { animation-delay: 120ms; }
 [data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(4) { animation-delay: 180ms; }
 [data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(n+5) { animation-delay: 240ms; }
 [class*="st-key-jtcard"], [class*="st-key-jtrecent"] {
-  animation: jt-pop 0.4s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation: jt-pop 0.45s var(--jt-ease) both;
   animation-delay: calc(var(--jt-i, 12) * 45ms + 150ms);
-  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
 }
 [class*="st-key-jtcard"]:hover, [class*="st-key-jtrecent"]:hover, [data-testid="stMetric"]:hover {
   transform: translateY(-2px);
-  box-shadow: 0 10px 24px rgba(11, 11, 11, 0.07);
+  box-shadow: 0 0 0 1px rgba(139, 124, 255, 0.25), 0 14px 36px rgba(139, 124, 255, 0.16);
 }
-[data-testid="stMetric"] { transition: transform 0.18s ease, box-shadow 0.18s ease; }
-[data-testid="stColumn"] [data-testid="stMetric"] { animation: jt-pop 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+[data-testid="stMetric"] { transition: transform 0.2s ease, box-shadow 0.2s ease; }
+[data-testid="stColumn"] [data-testid="stMetric"] { animation: jt-pop 0.5s var(--jt-ease) both; }
 [data-testid="stColumn"]:nth-child(2) [data-testid="stMetric"] { animation-delay: 70ms; }
 [data-testid="stColumn"]:nth-child(3) [data-testid="stMetric"] { animation-delay: 140ms; }
 [data-testid="stColumn"]:nth-child(4) [data-testid="stMetric"] { animation-delay: 210ms; }
 [data-testid="stColumn"]:nth-child(5) [data-testid="stMetric"] { animation-delay: 280ms; }
 .stButton button, .stFormSubmitButton button, .stDownloadButton button {
-  transition: transform 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+  transition: transform 0.15s ease, box-shadow 0.2s ease, background-color 0.15s ease;
 }
-.stButton button[kind="primary"]:hover, .stFormSubmitButton button[kind="primaryFormSubmit"]:hover {
+.stButton button[kind="primary"]:hover, .stFormSubmitButton button[kind="primaryFormSubmit"]:hover,
+.stDownloadButton button[kind="primary"]:hover {
   transform: translateY(-1px);
-  box-shadow: 0 6px 16px rgba(42, 120, 214, 0.28);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 0 0 1px rgba(185, 174, 255, 0.7),
+              0 8px 30px rgba(139, 124, 255, 0.5);
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -129,7 +263,9 @@ def percent(value):
     return "–" if value is None else f"{value:.0%}"
 
 
-def heading(title, subtitle=None):
+def heading(title, subtitle=None, eyebrow=None):
+    if eyebrow:
+        st.markdown(f"<div class='jt-eyebrow'>{eyebrow}</div>", unsafe_allow_html=True)
     st.title(title)
     if subtitle:
         st.markdown(f"<p class='jt-subtitle'>{subtitle}</p>", unsafe_allow_html=True)
@@ -296,9 +432,12 @@ def update_banner(db):
 
 
 def demo_banner():
-    st.info(f"This is a demo with made-up applications. Try logging a job from a real link, recording an "
-            f"update, or the dashboard; changes stay in this browser tab. [See the code on GitHub]({REPO_URL})",
-            icon=":material/science:")
+    st.markdown(
+        f"<div class='jt-demo'><span class='jt-tag'>Sample data</span>"
+        f"<span><b>The companies here are fictional.</b> Try logging a real job link, recording an update, or "
+        f"exploring the dashboard. Your changes stay in this tab. <a href='{REPO_URL}' target='_blank'>"
+        f"See the code</a></span></div>",
+        unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------- Log a job
@@ -329,7 +468,7 @@ def page_log():
         draft_view(db, draft)
         return
 
-    heading("Log a job", "Paste the link to a job you applied to. The details fill themselves in.")
+    heading("Log a job", "Paste the link to a job you applied to. The details fill themselves in.", "01 · Log")
     with st.form("link"):
         entry, action = st.columns([5, 1], vertical_alignment="bottom")
         url = entry.text_input("Job link", placeholder="https://careers.example.com/jobs/data-analyst",
@@ -375,7 +514,7 @@ def draft_view(db, draft):
     source = draft.get("source")
     heading("Check the details",
             f"Filled in from {source}. Change anything that's off, then save." if source else
-            "Fill in the job, then save.")
+            "Fill in the job, then save.", "01 · Log")
     if draft.get("warning"):
         st.warning(draft["warning"], icon=":material/info:")
     existing = jl.match_existing(jl.load_existing(db), draft.get("company_name", ""),
@@ -510,10 +649,11 @@ def application_card(row, position):
 
 def pipeline_board(summary):
     summary = summary.assign(column=summary["status"].map(board_column))
-    for (name, _, _), area in zip(BOARD, st.columns(len(BOARD), gap="small")):
+    for (name, color, _), area in zip(BOARD, st.columns(len(BOARD), gap="small")):
         rows = summary[summary["column"] == name].sort_values(["status_date", "application_id"], ascending=False)
         with area:
-            st.markdown(f"<div class='jt-col-head'><span>{name}</span><span class='jt-count'>{len(rows)}</span></div>",
+            st.markdown(f"<div class='jt-col-head'><span><span class='jt-dot' style='--c: {DOT_COLORS[color]}'>"
+                        f"</span>{name}</span><span class='jt-count'>{len(rows)}</span></div>",
                         unsafe_allow_html=True)
             with st.container(height=680, border=False):
                 for position, row in enumerate(rows.head(CARDS_PER_COLUMN).itertuples()):
@@ -549,7 +689,7 @@ def pipeline_table(summary):
 
 def page_pipeline():
     db = current_db()
-    heading("Pipeline", "Every application and where it stands.")
+    heading("Pipeline", "Every application and where it stands.", "02 · Track")
     apps, events = analytics.load(db)
     if apps.empty:
         st.info("No applications yet. Log your first one on the Log a job page.", icon=":material/inbox:")
@@ -594,7 +734,7 @@ def funnel_chart(data):
                  alt.Tooltip("share:Q", title="Share of all", format=".0%")],
     )
     bars = base.mark_bar(size=22, cornerRadiusEnd=4).encode(
-        color=alt.Color("stage:N", scale=alt.Scale(domain=analytics.FUNNEL, range=FUNNEL_BLUES), legend=None))
+        color=alt.Color("stage:N", scale=alt.Scale(domain=analytics.FUNNEL, range=FUNNEL_SHADES), legend=None))
     labels = base.mark_text(align="left", dx=6, color=INK_2).encode(text="label:N")
     return styled(bars + labels, 200)
 
@@ -602,7 +742,7 @@ def funnel_chart(data):
 def weekly_chart(data):
     one_year = data["week"].dt.year.nunique() <= 1
     data = data.assign(label=data["week"].dt.strftime("%b %d" if one_year else "%b %d, %Y"))
-    return styled(alt.Chart(data).mark_bar(size=18, cornerRadiusEnd=4, color=BLUE).encode(
+    return styled(alt.Chart(data).mark_bar(size=18, cornerRadiusEnd=4, color=ACCENT).encode(
         x=alt.X("label:O", sort=None, title=None, axis=alt.Axis(labelAngle=0, labelOverlap="greedy", grid=False)),
         y=alt.Y("applications:Q", title=None, axis=alt.Axis(format="d", tickMinStep=1)),
         tooltip=[alt.Tooltip("label:N", title="Week of"), alt.Tooltip("applications:Q", title="Applications"),
@@ -625,7 +765,7 @@ def rate_chart(data, column):
                  alt.Tooltip("response_rate:Q", title="Response rate", format=".0%"),
                  alt.Tooltip("interview_rate:Q", title="Interview rate", format=".0%")],
     )
-    bars = base.mark_bar(size=18, cornerRadiusEnd=4, color=BLUE)
+    bars = base.mark_bar(size=18, cornerRadiusEnd=4, color=ACCENT)
     labels = base.mark_text(align="left", dx=6, color=INK_2).encode(text="label:N")
     return styled(bars + labels, 38 * len(data) + 24)
 
@@ -654,7 +794,7 @@ PERIODS = {"Last 30 days": 30, "Last 90 days": 90, "All time": None}
 
 def page_dashboard():
     db = current_db()
-    heading("Dashboard", "What's working in your search.")
+    heading("Dashboard", "What's working in your search.", "03 · Learn")
     apps, events = analytics.load(db)
     if apps.empty:
         st.info("Nothing to show yet. Log a few applications first.", icon=":material/insights:")
@@ -756,7 +896,7 @@ def import_preview(db, rows):
 def page_settings():
     db = current_db()
     demo = st.session_state.get("demo")
-    heading("Settings")
+    heading("Settings", eyebrow="04 · Set up")
     connection, resumes, files, bookmark = st.tabs(["Connection", "Resume versions", "Import & export",
                                                     "Log this job bookmark"])
     with connection:
@@ -816,8 +956,15 @@ PAGES = [
 ]
 
 
+def footer():
+    st.markdown(f"<div class='jt-footer'><span>Job Search Tracker · sample data, reset when you close the tab</span>"
+                f"<span>Built by <a href='{AUTHOR_URL}' target='_blank'>Mojolaoluwa (David) Babafemi</a> · "
+                f"<a href='{REPO_URL}' target='_blank'>Source on GitHub</a></span></div>", unsafe_allow_html=True)
+
+
 def main(demo=False):
-    st.set_page_config(page_title="Job Search Tracker", page_icon=":material/work_history:", layout="wide")
+    st.set_page_config(page_title="Job Search Tracker", page_icon=LOGO, layout="wide")
+    st.logo(LOGO, size="medium")
     st.markdown(CSS, unsafe_allow_html=True)
     if demo:
         st.session_state["demo"] = True
@@ -845,6 +992,8 @@ def main(demo=False):
         else:
             update_banner(db)
         navigation.run()
+        if demo:
+            footer()
     finally:
         if close_after:
             db.close()
